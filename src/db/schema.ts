@@ -1,4 +1,4 @@
-import { pgTable, text, integer, boolean, doublePrecision, real, index } from 'drizzle-orm/pg-core';
+import { pgTable, text, integer, boolean, doublePrecision, real, index, timestamp, date, uniqueIndex } from 'drizzle-orm/pg-core';
 import { relations } from 'drizzle-orm';
 
 // ==========================================
@@ -43,6 +43,22 @@ export const usuarios = pgTable('usuarios', {
 }, (table) => ({
   emailIdx: index('usuarios_email_idx').on(table.email),
   municipioIdx: index('usuarios_municipio_idx').on(table.municipioId),
+}));
+
+export const authSessions = pgTable('auth_sessions', {
+  id: text('id').primaryKey(),
+  familyId: text('family_id').notNull(),
+  userId: text('user_id').notNull(),
+  userType: text('user_type').notNull(),
+  tokenHash: text('token_hash').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  revokedAt: timestamp('revoked_at', { withTimezone: true }),
+  replacedByHash: text('replaced_by_hash'),
+}, (table) => ({
+  tokenHashIdx: uniqueIndex('auth_sessions_token_hash_idx').on(table.tokenHash),
+  familyIdx: index('auth_sessions_family_id_idx').on(table.familyId),
+  userIdx: index('auth_sessions_user_idx').on(table.userId, table.userType),
 }));
 
 export const mercados = pgTable('mercados', {
@@ -91,10 +107,14 @@ export const contribuintes = pgTable('contribuintes', {
   documento: text('documento').notNull(),
   mercadoId: text('mercado_id').notNull().references(() => mercados.id, { onDelete: 'restrict' }),
   numBanca: text('num_banca').notNull(),
-  categoria: text('categoria').notNull(),
+  categoria: text('categoria').notNull().references(() => categoriasContribuintes.id, { onDelete: 'restrict' }),
   atividade: text('atividade').notNull(),
+  dimensao: text('dimensao').notNull(),
+  dataRegistro: timestamp('data_registro', { withTimezone: true }).notNull().defaultNow(),
+  agenteId: text('agente_id').notNull().references(() => agentes.id, { onDelete: 'restrict' }),
   observacoes: text('observacoes').notNull(),
   status: text('status').notNull().default('ativo'),
+  reativarEm: date('reativar_em', { mode: 'string' }),
   qrCode: text('qr_code'),
   areaM2: real('area_m2'),
   foto: text('foto'),
@@ -102,7 +122,16 @@ export const contribuintes = pgTable('contribuintes', {
   mercadoIdx: index('contribuintes_mercado_idx').on(table.mercadoId),
   documentoIdx: index('contribuintes_documento_idx').on(table.documento),
   statusIdx: index('contribuintes_status_idx').on(table.status),
+  registroIdx: index('contribuintes_data_registro_idx').on(table.dataRegistro),
+  agenteIdx: index('contribuintes_agente_idx').on(table.agenteId),
 }));
+
+export const categoriasContribuintes = pgTable('categoria_contribuintes', {
+  id: text('id').primaryKey(),
+  nome: text('nome').notNull(),
+  descricao: text('descricao').notNull().default(''),
+  status: text('status').notNull().default('ativo'),
+});
 
 export const tiposReceita = pgTable('tipos_receita', {
   id: text('id').primaryKey(),
@@ -226,6 +255,10 @@ export const contribuintesRelations = relations(contribuintes, ({ one, many }) =
   mercado: one(mercados, {
     fields: [contribuintes.mercadoId],
     references: [mercados.id],
+  }),
+  agente: one(agentes, {
+    fields: [contribuintes.agenteId],
+    references: [agentes.id],
   }),
   pagamentos: many(pagamentos),
 }));

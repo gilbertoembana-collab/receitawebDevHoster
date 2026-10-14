@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { africanCountries, findAfricanCountry } from '../../utils/africaLocations';
 import { useAppStore } from '../../store';
 import { Municipio } from '../../types';
 import { 
@@ -60,6 +61,7 @@ export default function Municipios() {
   const [status, setStatus] = useState<'ativo' | 'inativo'>('ativo');
   
   // Licensing & Hierarchy Fields
+  const [paisId, setPaisId] = useState('GW');
   const [paisNome, setPaisNome] = useState('Guiné-Bissau');
   const [ministerioNome, setMinisterioNome] = useState('Ministério da Administração Territorial');
   const [plano, setPlano] = useState('Prata');
@@ -75,6 +77,7 @@ export default function Municipios() {
   const modulosDisponiveis = [
     'Mercados', 'Taxas', 'Financeiro', 'Fiscalização', 'Tesouraria', 'Património', 'Relatórios', 'Auditoria'
   ];
+  const selectedCountry = africanCountries.find(country => country.isoCode === paisId);
 
   // Complete multi-tenant data isolation logic
   const filtered = municipios.filter(m => {
@@ -103,7 +106,9 @@ export default function Municipios() {
     setEmail('');
     setResponsavel('');
     setStatus('ativo');
-    setPaisNome('Guiné-Bissau');
+    const defaultCountry = findAfricanCountry('GW');
+    setPaisId(defaultCountry?.isoCode || 'GW');
+    setPaisNome(defaultCountry?.name || 'Guiné-Bissau');
     setMinisterioNome('Ministério da Administração Territorial');
     setPlano('Prata');
     setDataAtivacao('2026-01-01');
@@ -125,7 +130,9 @@ export default function Municipios() {
     setEmail(item.email);
     setResponsavel(item.responsavel);
     setStatus(item.status);
-    setPaisNome(item.paisNome || 'Guiné-Bissau');
+    const country = findAfricanCountry(item.paisId, item.paisNome) || findAfricanCountry('GW');
+    setPaisId(country?.isoCode || 'GW');
+    setPaisNome(country?.name || item.paisNome || 'Guiné-Bissau');
     setMinisterioNome(item.ministerioNome || 'Ministério da Administração Territorial');
     setPlano(item.plano || 'Prata');
     setDataAtivacao(item.dataAtivacao || '2026-01-01');
@@ -156,8 +163,8 @@ export default function Municipios() {
       email: email.trim().toLowerCase(), 
       responsavel: responsavel.trim(), 
       status,
-      paisId: 'gw',
-      paisNome: paisNome.trim(),
+      paisId: selectedCountry?.isoCode || paisId,
+      paisNome: selectedCountry?.name || paisNome.trim(),
       ministerioId: 'mat-gw',
       ministerioNome: ministerioNome.trim(),
       plano,
@@ -499,14 +506,6 @@ export default function Municipios() {
               id="muni-field-codigo"
             />
             <TextField
-              label="Região / Província"
-              fullWidth
-              value={regiao}
-              onChange={(e) => setRegiao(e.target.value)}
-              size="small"
-              id="muni-field-regiao"
-            />
-            <TextField
               required
               label="Nome do Responsável / Prefeito"
               fullWidth
@@ -516,13 +515,45 @@ export default function Municipios() {
               id="muni-field-responsavel"
             />
             <TextField
+              select
               label="País Sede"
               fullWidth
-              value={paisNome}
-              onChange={(e) => setPaisNome(e.target.value)}
+              value={paisId}
+              onChange={(e) => {
+                const selected = africanCountries.find(country => country.isoCode === e.target.value);
+                setPaisId(e.target.value);
+                setPaisNome(selected?.name || '');
+                setRegiao('');
+              }}
               size="small"
               id="muni-field-pais"
-            />
+            >
+              {africanCountries.map(country => (
+                <MenuItem key={country.isoCode} value={country.isoCode}>
+                  {country.name}
+                </MenuItem>
+              ))}
+            </TextField>
+            <TextField
+              select
+              label="Região / Estado"
+              fullWidth
+              value={regiao}
+              onChange={(e) => setRegiao(e.target.value)}
+              size="small"
+              id="muni-field-regiao"
+              disabled={!selectedCountry}
+            >
+              <MenuItem value="">Selecione uma região / estado</MenuItem>
+              {regiao && !selectedCountry?.regions.includes(regiao) && (
+                <MenuItem value={regiao}>{regiao}</MenuItem>
+              )}
+              {selectedCountry?.regions.map(region => (
+                <MenuItem key={`${selectedCountry.isoCode}-${region}`} value={region}>
+                  {region}
+                </MenuItem>
+              ))}
+            </TextField>
             <TextField
               label="Ministério Supervisor Tutor"
               fullWidth

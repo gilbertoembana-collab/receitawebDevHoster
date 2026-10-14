@@ -2,33 +2,201 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import * as dotenv from 'dotenv';
-import crypto from 'crypto';
 dotenv.config();
-
-// SHA-256 Hashing helper to secure agent passwords
-function hashPassword(plainText: string): string {
-  if (!plainText) return '';
-  return crypto.createHash('sha256').update(plainText).digest('hex');
-}
 
 import { db } from './src/db/index.ts';
 import { 
   usuarios, municipios, mercados, agentes, contribuintes, 
-  tiposReceita, pagamentos, auditoriaLog, sincronizacaoLog, configuracoes 
+  categoriasContribuintes, tiposReceita, pagamentos, auditoriaLog, sincronizacaoLog, configuracoes
 } from './src/db/schema.ts';
-import { eq } from 'drizzle-orm';
+import { and, asc, count, desc, eq, ilike, or, type SQL } from 'drizzle-orm';
 import { initializeDatabase } from './src/db/init.ts';
+import { createAuthSecurity, hashPassword, verifyStoredPassword } from './src/auth/security.js';
+
+async function hashImportedPassword(value: unknown): Promise<string | null> {
+  if (typeof value !== 'string' || !value) return null;
+  if (value.startsWith('$argon2id$') || /^[a-f0-9]{64}$/i.test(value)) return value;
+  return hashPassword(value, { minimumLength: 1 });
+}
+
+function classifyImportedContributor(activityValue: unknown, categoryValue: unknown) {
+  const activity = typeof activityValue === 'string' ? activityValue.trim() : '';
+  const activityKey = activity.toLocaleLowerCase('pt');
+  const oldCategory = typeof categoryValue === 'string' ? categoryValue.trim() : '';
+  let category = 'Comércio Geral/Por Classificar';
+
+  if (/(roup|vestu|tecid|camisol|calçad|calcad|sapato|chinel|alfaiat|confec|boutique)/i.test(activityKey)) {
+    category = 'Vestuário, Tecidos e Calçados';
+  } else if (/(celular|telefone|telemóvel|telemovel|eletrónic|eletronic|comput|informátic|informatic|técnic|tecnic)/i.test(activityKey)) {
+    category = 'Eletrônica, Telecomunicações e Reparação';
+  } else if (/(carro|automóvel|automovel|peças de carro|pecas de carro|peças.*veículo|pecas.*veiculo)/i.test(activityKey)) {
+    category = 'Automóvel e Peças';
+  } else if (/(construção|construcao|canalização|canalizacao|materiais de eletricidade|cimento|ferramentas)/i.test(activityKey)) {
+    category = 'Construção e Materiais';
+  } else if (/(cosmétic|cosmetic|higiene|perfum|sabão|sabao)/i.test(activityKey)) {
+    category = 'Cosmética e Higiene';
+  } else if (/(artesan|cestaria|escultura)/i.test(activityKey)) {
+    category = 'Artesanato e Produção';
+  } else if (/(alimento|comida|legume|hortaliç|hortalic|peixe|carne|fruta|bebida|cereal|mandioca|batata)/i.test(activityKey)
+    || ['Alimentos', 'Carnes/Peixes', 'Cereais'].includes(oldCategory)) {
+    category = 'Alimentos e Produtos Frescos';
+  } else if (oldCategory === 'Confecções') {
+    category = 'Vestuário, Tecidos e Calçados';
+  } else if (oldCategory === 'Eletrônicos') {
+    category = 'Eletrônica, Telecomunicações e Reparação';
+  } else if (oldCategory === 'Artesanato') {
+    category = 'Artesanato e Produção';
+  }
+
+  const dimensao = /(atacado|atacadista|grossista|distribuidor|importador)/i.test(activityKey)
+    ? 'Grande'
+    : /(eletrónic|eletronic|celular|telemóvel|telemovel|peças de carro|pecas de carro|automóvel|automovel|construção|construcao|materiais de eletricidade|canalização|canalizacao)/i.test(activityKey)
+      ? 'Médio'
+      : activity ? 'Pequeno' : 'Micro';
+
+  return { atividade: activity, categoria: category, dimensao };
+}
+
+const LEGACY_REGISTRATION_AGENT_ID = 'agen-f7rm38ilf';
+
+async function resolveContributorRegistrationAgent(req: express.Request): Promise<string> {
+  if (req.auth?.kind === 'agent') {
+    const [agent] = await db.select({ id: agentes.id }).from(agentes)
+      .where(eq(agentes.id, req.auth.id)).limit(1);
+    if (agent) return agent.id;
+    throw new Error('Authenticated agent does not exist.');
+  }
+
+  if (req.auth?.email) {
+    const [matchingAgent] = await db.select({ id: agentes.id }).from(agentes)
+      .where(eq(agentes.email, req.auth.email)).limit(1);
+    if (matchingAgent) return matchingAgent.id;
+  }
+
+  const [defaultAgent] = await db.select({ id: agentes.id }).from(agentes)
+    .where(eq(agentes.id, LEGACY_REGISTRATION_AGENT_ID)).limit(1);
+  if (defaultAgent) return defaultAgent.id;
+  throw new Error('No agent is available to attribute the contributor registration.');
+}
+
+async function getContributorsPage(
+  tenantId: string | null,
+  page: number,
+  pageSize: number,
+  search = '',
+) {
+  const conditions: SQL[] = [];
+  if (tenantId) conditions.push(eq(mercados.municipioId, tenantId));
+  if (search) {
+    const pattern = `%${search}%`;
+    conditions.push(or(
+      ilike(contribuintes.nome, pattern),
+      ilike(contribuintes.documento, pattern),
+      ilike(contribuintes.numBanca, pattern),
+      ilike(contribuintes.telefone, pattern),
+      ilike(contribuintes.qrCode, pattern),
+      ilike(contribuintes.dimensao, pattern),
+      ilike(categoriasContribuintes.nome, pattern),
+    )!);
+  }
+  const where = conditions.length ? and(...conditions) : undefined;
+
+  const [countResult, items] = await Promise.all([
+    db.select({ total: count() })
+      .from(contribuintes)
+      .innerJoin(mercados, eq(contribuintes.mercadoId, mercados.id))
+      .innerJoin(categoriasContribuintes, eq(contribuintes.categoria, categoriasContribuintes.id))
+      .where(where),
+    db.select({
+      id: contribuintes.id,
+      nome: contribuintes.nome,
+      telefone: contribuintes.telefone,
+      documento: contribuintes.documento,
+      mercadoId: contribuintes.mercadoId,
+      numBanca: contribuintes.numBanca,
+      categoria: contribuintes.categoria,
+      atividade: contribuintes.atividade,
+      dimensao: contribuintes.dimensao,
+      dataRegistro: contribuintes.dataRegistro,
+      agenteId: contribuintes.agenteId,
+      agenteNome: agentes.nome,
+      reativarEm: contribuintes.reativarEm,
+      observacoes: contribuintes.observacoes,
+      status: contribuintes.status,
+      qrCode: contribuintes.qrCode,
+      areaM2: contribuintes.areaM2,
+      foto: contribuintes.foto,
+    })
+      .from(contribuintes)
+      .innerJoin(mercados, eq(contribuintes.mercadoId, mercados.id))
+      .innerJoin(categoriasContribuintes, eq(contribuintes.categoria, categoriasContribuintes.id))
+      .innerJoin(agentes, eq(contribuintes.agenteId, agentes.id))
+      .where(where)
+      .orderBy(asc(contribuintes.nome), asc(contribuintes.id))
+      .limit(pageSize)
+      .offset(page * pageSize),
+  ]);
+
+  return { items, total: countResult[0]?.total || 0, page, pageSize };
+}
+
+declare global {
+  namespace Express {
+    interface Request {
+      auth?: {
+        id: string;
+        kind: 'user' | 'agent';
+        role: string;
+        email: string | null;
+        municipalityId: string | null;
+        mustChangePassword: boolean;
+      };
+    }
+  }
+}
 
 async function startServer() {
   const app = express();
   const PORT = parseInt(process.env.PORT || '3000', 10) || 3000;
+  const { createPool } = await import('./src/db/index.ts');
+  const pool = createPool();
+  const auth = createAuthSecurity(pool);
+  const reactivateExpiredContributors = async () => {
+    await pool.query(
+      `UPDATE contribuintes
+       SET status = 'ativo', reativar_em = NULL
+       WHERE status = 'inativo' AND reativar_em <= CURRENT_DATE`,
+    );
+  };
+  const validateReactivationDate = async (value: unknown): Promise<string | null> => {
+    if (value == null || value === '') return null;
+    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+      throw new Error('Informe uma data válida para a reativação automática.');
+    }
+    const parsed = new Date(`${value}T00:00:00Z`);
+    if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) {
+      throw new Error('Informe uma data válida para a reativação automática.');
+    }
+    const [dateCheck] = (await pool.query(
+      'SELECT $1::date > CURRENT_DATE AS is_future',
+      [value],
+    )).rows;
+    if (!dateCheck.is_future) {
+      throw new Error('A data de reativação deve ser posterior à data de hoje.');
+    }
+    return value;
+  };
+  app.set('trust proxy', process.env.TRUST_PROXY === '1' ? 1 : false);
 
   // Express middleware to parse json bodies
-  app.use(express.json());
+  app.use(express.json({ limit: '15mb' }));
+  app.use(auth.cors);
+  app.use(auth.authenticateApi);
+  app.use(auth.authorizeApi);
 
   // Add simple console logger for APIs
   app.use((req, res, next) => {
-    console.log(`[API] ${req.method} ${req.url}`);
+    console.log(`[API] ${req.method} ${req.path}`);
     next();
   });
 
@@ -41,6 +209,9 @@ async function startServer() {
   });
 
   app.get('/api/connection-status', async (req, res) => {
+    if (!['Platform Owner', 'Super Admin', 'Super Administrador', 'Administrator'].includes(req.auth?.role || '')) {
+      return res.status(403).json({ error: 'Ação não autorizada.' });
+    }
     const startTime = Date.now();
     try {
       const { createPool } = await import('./src/db/index.ts');
@@ -89,17 +260,13 @@ async function startServer() {
   // --- API ROUTES ---
 
   function getTenantFilter(req: express.Request) {
-    const role = req.headers['x-user-role'] as string;
-    const municipioId = req.headers['x-municipio-id'] as string;
-    
-    const isPlatformOwner = role === 'Platform Owner';
-    const isNationalUser = ['Administrador Nacional', 'Supervisor Nacional', 'Auditor Nacional'].includes(role);
-    const isMunicipalUser = role && !isPlatformOwner && !isNationalUser;
-    
-    if (isMunicipalUser && municipioId) {
-      return municipioId;
-    }
-    return null;
+    const role = req.auth?.role;
+    const municipioId = req.auth?.municipalityId;
+    const isGlobalRole = [
+      'Platform Owner', 'Super Admin', 'Super Administrador', 'Administrator',
+      'Administrador Nacional', 'Supervisor Nacional', 'Auditor Nacional',
+    ].includes(role || '');
+    return isGlobalRole ? null : municipioId;
   }
 
   async function recordExists(table: any, column: any, value: string): Promise<boolean> {
@@ -112,49 +279,51 @@ async function startServer() {
     }
   }
 
-  async function normalizePagamentoPayload(body: any) {
+  async function normalizePagamentoPayload(body: any, principal: express.Request['auth']) {
     let id = body.id || body.reciboId || body.recibo_id || body.recibo || `REC-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
     let reciboId = body.reciboId || body.recibo_id || body.recibo || body.id || `REC-${Date.now()}`;
-    
-    let municipioId = body.municipioId || body.municipio_id || body.municipio;
+    const isGlobalRole = [
+      'Platform Owner', 'Super Admin', 'Super Administrador', 'Administrator',
+      'Administrador Nacional', 'Supervisor Nacional', 'Auditor Nacional',
+    ].includes(principal?.role || '');
+    const tenantId = isGlobalRole ? null : principal?.municipalityId;
+    let municipioId = principal?.kind === 'agent'
+      ? principal.municipalityId
+      : tenantId || body.municipioId || body.municipio_id || body.municipio;
     let mercadoId = body.mercadoId || body.mercado_id || body.mercado;
-    let agenteId = body.agenteId || body.agente_id || body.agente;
+    let agenteId = principal?.kind === 'agent' ? principal.id : (body.agenteId || body.agente_id || body.agente);
     let contribuinteId = body.contribuinteId || body.contribuinte_id || body.contribuinte;
     let tipoReceitaId = body.tipoReceitaId || body.tipo_receita_id || body.taxaId || body.tipo_receita;
 
-    // Check existence or fallback gracefully to first valid record in DB
-    if (!municipioId || !(await recordExists(municipios, municipios.id, municipioId))) {
-      const firstMuni = await db.select({ id: municipios.id }).from(municipios).limit(1);
-      municipioId = firstMuni[0]?.id || 'muni-1';
+    if (!municipioId || !mercadoId || !agenteId || !contribuinteId || !tipoReceitaId) {
+      throw new Error('Missing payment references.');
     }
-
-    if (!mercadoId || !(await recordExists(mercados, mercados.id, mercadoId))) {
-      const firstMerc = await db.select({ id: mercados.id }).from(mercados).where(eq(mercados.municipioId, municipioId)).limit(1);
-      if (firstMerc[0]?.id) {
-        mercadoId = firstMerc[0].id;
-      } else {
-        const anyMerc = await db.select({ id: mercados.id }).from(mercados).limit(1);
-        mercadoId = anyMerc[0]?.id || 'merc-1';
-      }
+    if (!(await recordExists(municipios, municipios.id, municipioId))) throw new Error('Invalid municipality.');
+    const marketRows = await pool.query(
+      'SELECT 1 FROM mercados WHERE id = $1 AND municipio_id = $2',
+      [mercadoId, municipioId],
+    );
+    if (!marketRows.rowCount) throw new Error('Invalid market.');
+    const agentRows = await db.select({ id: agentes.id, municipioId: agentes.municipioId, status: agentes.status })
+      .from(agentes).where(eq(agentes.id, agenteId)).limit(1);
+    if (!agentRows[0] || agentRows[0].municipioId !== municipioId || agentRows[0].status !== 'ativo') {
+      throw new Error('Invalid agent.');
     }
-
-    if (!agenteId || !(await recordExists(agentes, agentes.id, agenteId))) {
-      const firstAgent = await db.select({ id: agentes.id }).from(agentes).limit(1);
-      agenteId = firstAgent[0]?.id || 'agent-1';
+    if (principal?.kind === 'agent' && agenteId !== principal.id) throw new Error('Agent identity mismatch.');
+    const contributorRows = await db.select({
+      id: contribuintes.id,
+      mercadoId: contribuintes.mercadoId,
+      status: contribuintes.status,
+    })
+      .from(contribuintes).where(eq(contribuintes.id, contribuinteId)).limit(1);
+    if (!contributorRows[0] || contributorRows[0].mercadoId !== mercadoId || contributorRows[0].status !== 'ativo') {
+      throw new Error('Invalid contributor.');
     }
-
-    if (!contribuinteId || !(await recordExists(contribuintes, contribuintes.id, contribuinteId))) {
-      const firstContr = await db.select({ id: contribuintes.id }).from(contribuintes).limit(1);
-      contribuinteId = firstContr[0]?.id || 'cont-1';
-    }
-
-    if (!tipoReceitaId || !(await recordExists(tiposReceita, tiposReceita.id, tipoReceitaId))) {
-      const firstTipo = await db.select({ id: tiposReceita.id }).from(tiposReceita).limit(1);
-      tipoReceitaId = firstTipo[0]?.id || 'taxa-diaria-banca';
-    }
+    if (!(await recordExists(tiposReceita, tiposReceita.id, tipoReceitaId))) throw new Error('Invalid revenue type.');
 
     const valorNum = Number(body.valor !== undefined ? body.valor : (body.valor_pago !== undefined ? body.valor_pago : 0));
-    const valor = isNaN(valorNum) ? 0 : valorNum;
+    if (!Number.isSafeInteger(valorNum) || valorNum <= 0) throw new Error('Invalid payment amount.');
+    const valor = valorNum;
 
     let rawForma = String(body.formaPagamento || body.forma_pagamento || body.metodo_pagamento || body.metodoPagamento || body.meio_pagamento || 'Dinheiro').trim();
     let formaPagamento = 'Dinheiro';
@@ -169,20 +338,14 @@ async function startServer() {
     }
 
     const rawData = body.dataPagamento || body.data_pagamento || body.data_hora || body.dataHora || body.created_at || new Date().toISOString();
-    let dataPagamento = rawData;
-    try {
-      dataPagamento = new Date(rawData).toISOString();
-    } catch (e) {
-      dataPagamento = new Date().toISOString();
-    }
+    const parsedPaymentDate = new Date(rawData);
+    if (!Number.isFinite(parsedPaymentDate.getTime())) throw new Error('Invalid payment date.');
+    const dataPagamento = parsedPaymentDate.toISOString();
 
     const rawCriacao = body.dataCriacao || body.data_criacao || rawData;
-    let dataCriacao = rawCriacao;
-    try {
-      dataCriacao = new Date(rawCriacao).toISOString();
-    } catch (e) {
-      dataCriacao = new Date().toISOString();
-    }
+    const parsedCreationDate = new Date(rawCriacao);
+    if (!Number.isFinite(parsedCreationDate.getTime())) throw new Error('Invalid creation date.');
+    const dataCriacao = parsedCreationDate.toISOString();
 
     let rawStatus = String(body.status || 'pago').toLowerCase();
     let status = 'pago';
@@ -198,7 +361,7 @@ async function startServer() {
 
     const posInfo = body.pos_device_id || body.posDeviceId ? `[POS: ${body.pos_device_id || body.posDeviceId}]` : '';
     const userObs = body.observacao || body.observacoes || body.obs || '';
-    const observacao = [posInfo, userObs].filter(Boolean).join(' ') || '';
+    const observacao = ([posInfo, userObs].filter(Boolean).join(' ') || '').slice(0, 2000);
 
     return {
       id: String(id),
@@ -221,6 +384,8 @@ async function startServer() {
   app.get('/api/sync-state', async (req, res) => {
     try {
       const tenantId = getTenantFilter(req);
+      const isAgent = req.auth?.kind === 'agent';
+      const canSeeSystemLogs = ['Platform Owner', 'Super Admin', 'Super Administrador', 'Administrator'].includes(req.auth?.role || '');
 
       const [
         usuariosRes,
@@ -228,40 +393,51 @@ async function startServer() {
         mercadosRes,
         agentesRes,
         contribuintesRes,
+        categoriasContribuintesRes,
         tiposReceitaRes,
         pagamentosRes,
         auditoriaRes,
         sincronizacaoRes,
         configuracoesRes
       ] = await Promise.all([
-        tenantId ? db.select().from(usuarios).where(eq(usuarios.municipioId, tenantId)) : db.select().from(usuarios),
+        isAgent
+          ? Promise.resolve([])
+          : tenantId
+          ? db.select({
+              id: usuarios.id,
+              nome: usuarios.nome,
+              email: usuarios.email,
+              municipioId: usuarios.municipioId,
+              perfil: usuarios.perfil,
+              status: usuarios.status,
+              usuario: usuarios.usuario,
+            }).from(usuarios).where(eq(usuarios.municipioId, tenantId))
+          : db.select({
+              id: usuarios.id,
+              nome: usuarios.nome,
+              email: usuarios.email,
+              municipioId: usuarios.municipioId,
+              perfil: usuarios.perfil,
+              status: usuarios.status,
+              usuario: usuarios.usuario,
+            }).from(usuarios),
         tenantId ? db.select().from(municipios).where(eq(municipios.id, tenantId)) : db.select().from(municipios),
         tenantId ? db.select().from(mercados).where(eq(mercados.municipioId, tenantId)) : db.select().from(mercados),
-        tenantId ? db.select().from(agentes).where(eq(agentes.municipioId, tenantId)) : db.select().from(agentes),
-        tenantId 
-          ? db.select({
-              id: contribuintes.id,
-              nome: contribuintes.nome,
-              telefone: contribuintes.telefone,
-              documento: contribuintes.documento,
-              mercadoId: contribuintes.mercadoId,
-              numBanca: contribuintes.numBanca,
-              categoria: contribuintes.categoria,
-              atividade: contribuintes.atividade,
-              observacoes: contribuintes.observacoes,
-              status: contribuintes.status,
-              qrCode: contribuintes.qrCode,
-              areaM2: contribuintes.areaM2,
-              foto: contribuintes.foto,
-            })
-            .from(contribuintes)
-            .innerJoin(mercados, eq(contribuintes.mercadoId, mercados.id))
-            .where(eq(mercados.municipioId, tenantId))
-          : db.select().from(contribuintes),
+        isAgent
+          ? db.select().from(agentes).where(eq(agentes.id, req.auth!.id))
+          : tenantId ? db.select().from(agentes).where(eq(agentes.municipioId, tenantId)) : db.select().from(agentes),
+        getContributorsPage(tenantId, 0, 100).then(result => result.items),
+        db.select().from(categoriasContribuintes),
         db.select().from(tiposReceita),
-        tenantId ? db.select().from(pagamentos).where(eq(pagamentos.municipioId, tenantId)) : db.select().from(pagamentos),
-        db.select().from(auditoriaLog),
-        db.select().from(sincronizacaoLog),
+        isAgent
+          ? db.select().from(pagamentos).where(eq(pagamentos.agenteId, req.auth!.id))
+          : tenantId ? db.select().from(pagamentos).where(eq(pagamentos.municipioId, tenantId)) : db.select().from(pagamentos),
+        canSeeSystemLogs ? db.select().from(auditoriaLog) : Promise.resolve([]),
+        canSeeSystemLogs
+          ? db.select().from(sincronizacaoLog)
+          : isAgent
+            ? db.select().from(sincronizacaoLog).where(eq(sincronizacaoLog.agenteId, req.auth!.id))
+            : Promise.resolve([]),
         db.select().from(configuracoes).where(eq(configuracoes.id, 1))
       ]);
 
@@ -292,98 +468,169 @@ async function startServer() {
         }
       }));
 
-      const formattedAgentes = agentesRes.map(a => ({
-        ...a,
-        permissoes: a.permissoes ? a.permissoes.split(',') : []
-      }));
+      const formattedAgentes = agentesRes
+        .filter(a => req.auth?.kind !== 'agent' || a.id === req.auth.id)
+        .map(({ senha, senhaTemporaria, ...a }) => ({
+          ...a,
+          permissoes: a.permissoes ? a.permissoes.split(',') : []
+        }));
 
+      const config = configuracoesRes[0] || {};
       res.json({
         usuarios: usuariosRes,
         municipios: formattedMunicipios,
         mercados: formattedMercados,
         agentes: formattedAgentes,
         contribuintes: contribuintesRes,
+        categoria_contribuintes: categoriasContribuintesRes,
         tipos_receita: tiposReceitaRes,
         pagamentos: pagamentosRes,
         auditoria: auditoriaRes,
         sincronizacao: sincronizacaoRes,
-        configuracoes: configuracoesRes[0] || {}
+        configuracoes: config
       });
     } catch (error: any) {
       console.error('Error in sync-state endpoint:', error);
-      res.status(500).json({ error: 'Erro ao sincronizar dados', details: error.message });
+      res.status(500).json({ error: 'Erro ao sincronizar dados.' });
     }
   });
 
   // 1. Usuarios & Authentication (Server-Side Cryptographic Security)
-  app.post('/api/auth/login', async (req, res) => {
+  app.post('/api/auth/login', auth.authRateLimit, async (req, res) => {
     try {
       const { login, password } = req.body;
-      if (!login || !password) {
-        return res.status(400).json({ error: 'Login ou senha incorreto.' });
+      if (typeof login !== 'string' || login.length > 254 || typeof password !== 'string' || !password || password.length > 128) {
+        return res.status(401).json({ error: 'Login ou senha inválidos.' });
       }
 
-      const input = String(login).toLowerCase().trim();
-      const crypto = await import('crypto');
-      const inputHash = crypto.createHash('sha256').update(password).digest('hex');
+      const input = login.toLowerCase().trim();
+      const rows = await db.select().from(usuarios).where(or(
+        eq(usuarios.email, input),
+        eq(usuarios.usuario, input),
+        eq(usuarios.id, input),
+      )).limit(1);
+      const user = rows[0];
 
-      // Check users table
-      const allUsers = await db.select().from(usuarios);
-      const user = allUsers.find(u => 
-        u.email.toLowerCase() === input || 
-        (u.usuario && u.usuario.toLowerCase() === input) ||
-        u.id.toLowerCase() === input
-      );
-
-      if (!user || user.status === 'inativo') {
-        return res.status(401).json({ error: 'Login ou senha incorreto.' });
+      if (!user || user.status !== 'ativo') {
+        return res.status(401).json({ error: 'Login ou senha inválidos.' });
       }
 
-      // Verify hashed password (or default initial password)
-      const validPassword = 
-        (user.senha && (user.senha === inputHash || user.senha === password)) ||
-        password === '123456' || 
-        password === 'Passar@2026';
-
-      if (!validPassword) {
-        return res.status(401).json({ error: 'Login ou senha incorreto.' });
+      const passwordCheck = await verifyStoredPassword(password, user.senha || '');
+      if (!passwordCheck.valid) {
+        return res.status(401).json({ error: 'Login ou senha inválidos.' });
       }
 
-      // Return sanitized user without raw password
-      const { senha, ...safeUser } = user;
-      res.json({ success: true, user: safeUser });
+      if (passwordCheck.needsRehash) {
+        await createPool().query(
+          'UPDATE usuarios SET senha = $1 WHERE id = $2',
+          [await hashPassword(password, { minimumLength: 1 }), user.id],
+        );
+      }
+
+      return auth.issueSession(req, res, {
+        id: user.id,
+        nome: user.nome,
+        email: user.email,
+        usuario: user.usuario,
+        municipioId: user.municipioId,
+        perfil: user.perfil,
+        role: user.perfil,
+        municipalityId: user.municipioId,
+        kind: 'user',
+      });
     } catch (error: any) {
-      console.error('Error in auth login:', error);
-      res.status(500).json({ error: 'Login ou senha incorreto.' });
+      console.error('User authentication failed.');
+      res.status(500).json({ error: 'Não foi possível autenticar.' });
+    }
+  });
+
+  app.post('/api/auth/refresh', auth.authRateLimit, auth.refresh);
+  app.post('/api/auth/logout', auth.logout);
+  app.get('/api/auth/me', async (req, res) => {
+    if (req.auth?.kind === 'agent') {
+      const rows = await db.select({
+        id: agentes.id,
+        nome: agentes.nome,
+        email: agentes.email,
+        usuario: agentes.usuario,
+        municipioId: agentes.municipioId,
+        cargo: agentes.cargo,
+        status: agentes.status,
+        permissoes: agentes.permissoes,
+        resetSenhaPending: agentes.resetSenhaPending,
+      }).from(agentes).where(eq(agentes.id, req.auth.id)).limit(1);
+      if (!rows[0] || rows[0].status !== 'ativo') return res.status(401).json({ error: 'Sessão inválida.' });
+      const user = { ...rows[0], perfil: 'AGENTE', permissoes: rows[0].permissoes?.split(',') || [] };
+      return res.json({ user });
+    }
+    const rows = await db.select({
+      id: usuarios.id,
+      nome: usuarios.nome,
+      email: usuarios.email,
+      usuario: usuarios.usuario,
+      municipioId: usuarios.municipioId,
+      perfil: usuarios.perfil,
+      status: usuarios.status,
+    }).from(usuarios).where(eq(usuarios.id, req.auth.id)).limit(1);
+    if (!rows[0] || rows[0].status !== 'ativo') return res.status(401).json({ error: 'Sessão inválida.' });
+    return res.json({ user: rows[0] });
+  });
+  app.post('/api/auth/change-password', async (req, res) => {
+    try {
+      if (req.auth?.kind !== 'user') return res.status(403).json({ error: 'Ação não autorizada.' });
+      const { currentPassword, newPassword } = req.body;
+      if (typeof currentPassword !== 'string' || !currentPassword || typeof newPassword !== 'string' || newPassword.length < 12 || newPassword.length > 128) {
+        return res.status(400).json({ error: 'A senha atual e uma nova senha de 12 a 128 caracteres são obrigatórias.' });
+      }
+      const rows = await db.select().from(usuarios).where(eq(usuarios.id, req.auth.id)).limit(1);
+      const user = rows[0];
+      if (!user || user.status !== 'ativo') return res.status(401).json({ error: 'Sessão inválida.' });
+      const currentCheck = await verifyStoredPassword(currentPassword, user.senha || '');
+      if (!currentCheck.valid) return res.status(401).json({ error: 'A senha atual está incorreta.' });
+      await createPool().query(
+        'UPDATE usuarios SET senha = $1 WHERE id = $2',
+        [await hashPassword(newPassword), user.id],
+      );
+      await createPool().query(
+        'UPDATE auth_sessions SET revoked_at = COALESCE(revoked_at, NOW()) WHERE user_id = $1 AND user_type = $2',
+        [user.id, 'user'],
+      );
+      return res.json({ success: true });
+    } catch {
+      console.error('User password update failed.');
+      return res.status(500).json({ error: 'Não foi possível alterar a senha.' });
     }
   });
 
   app.get('/api/usuarios', async (req, res) => {
     try {
       const tenantId = getTenantFilter(req);
-      let result;
-      if (tenantId) {
-        result = await db.select().from(usuarios).where(eq(usuarios.municipioId, tenantId));
-      } else {
-        result = await db.select().from(usuarios);
-      }
-      // Sanitize passwords from API output for security
-      const sanitized = result.map(({ senha, ...u }) => u);
-      res.json(sanitized);
+      const columns = {
+        id: usuarios.id,
+        nome: usuarios.nome,
+        email: usuarios.email,
+        municipioId: usuarios.municipioId,
+        perfil: usuarios.perfil,
+        status: usuarios.status,
+        usuario: usuarios.usuario,
+      };
+      const result = tenantId
+        ? await db.select(columns).from(usuarios).where(eq(usuarios.municipioId, tenantId))
+        : await db.select(columns).from(usuarios);
+      res.json(result);
     } catch (error: any) {
       console.error('Error fetching usuarios:', error);
-      res.status(500).json({ error: 'Erro ao buscar usuários', details: error.message });
+      res.status(500).json({ error: 'Erro ao buscar usuários.' });
     }
   });
 
   app.post('/api/usuarios', async (req, res) => {
     try {
       const b = req.body;
-      const crypto = await import('crypto');
-      let senhaHash = '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92'; // default sha256 of 123456
-      if (b.senha && typeof b.senha === 'string' && b.senha.trim() !== '') {
-        senhaHash = b.senha.length === 64 ? b.senha : crypto.createHash('sha256').update(b.senha).digest('hex');
+      if (typeof b.senha !== 'string' || b.senha.length < 12 || b.senha.length > 128) {
+        return res.status(400).json({ error: 'A senha é obrigatória e deve ter entre 12 e 128 caracteres.' });
       }
+      const senhaHash = await hashPassword(b.senha);
 
       const mId = b.municipioId ?? b.municipio_id;
       const cleanMunicipioId = (mId && typeof mId === 'string' && mId.trim() !== '' && mId !== 'null' && mId !== 'central') ? mId.trim() : null;
@@ -404,7 +651,7 @@ async function startServer() {
       res.status(201).json(safeUser);
     } catch (error: any) {
       console.error('Error creating usuario:', error);
-      res.status(500).json({ error: 'Erro ao criar usuário', details: error.message });
+      res.status(500).json({ error: 'Erro ao criar usuário.' });
     }
   });
 
@@ -424,19 +671,27 @@ async function startServer() {
       }
       
       if (b.senha !== undefined && b.senha !== null && b.senha !== '') {
-        const crypto = await import('crypto');
-        updateData.senha = b.senha.length === 64 ? b.senha : crypto.createHash('sha256').update(b.senha).digest('hex');
+        if (typeof b.senha !== 'string' || b.senha.length < 12 || b.senha.length > 128) {
+          return res.status(400).json({ error: 'A senha deve ter entre 12 e 128 caracteres.' });
+        }
+        updateData.senha = await hashPassword(b.senha);
       }
 
       const result = await db.update(usuarios)
         .set(updateData)
         .where(eq(usuarios.id, req.params.id))
         .returning();
+      if (result[0] && updateData.senha) {
+        await createPool().query(
+          'UPDATE auth_sessions SET revoked_at = COALESCE(revoked_at, NOW()) WHERE user_id = $1 AND user_type = $2',
+          [req.params.id, 'user'],
+        );
+      }
       const resObj = result[0] ? (({ senha, ...rest }) => rest)(result[0]) : { success: true };
       res.json(resObj);
     } catch (error: any) {
       console.error('Error updating usuario:', error);
-      res.status(500).json({ error: 'Erro ao atualizar usuário', details: error.message });
+      res.status(500).json({ error: 'Erro ao atualizar usuário.' });
     }
   });
 
@@ -446,7 +701,7 @@ async function startServer() {
       res.json({ success: true, message: 'Usuário removido com sucesso' });
     } catch (error: any) {
       console.error('Error deleting usuario:', error);
-      res.status(500).json({ error: 'Erro ao remover usuário', details: error.message });
+      res.status(500).json({ error: 'Erro ao remover usuário.' });
     }
   });
 
@@ -477,7 +732,7 @@ async function startServer() {
       res.json(formatted);
     } catch (error: any) {
       console.error('Error fetching municipios:', error);
-      res.status(500).json({ error: 'Erro ao buscar municípios', details: error.message });
+      res.status(500).json({ error: 'Erro ao buscar municípios.' });
     }
   });
 
@@ -498,7 +753,7 @@ async function startServer() {
       res.status(201).json(created);
     } catch (error: any) {
       console.error('Error creating municipio:', error);
-      res.status(500).json({ error: 'Erro ao criar município', details: error.message });
+      res.status(500).json({ error: 'Erro ao criar município.' });
     }
   });
 
@@ -522,7 +777,7 @@ async function startServer() {
       res.json(updated || { success: true });
     } catch (error: any) {
       console.error('Error updating municipio:', error);
-      res.status(500).json({ error: 'Erro ao atualizar município', details: error.message });
+      res.status(500).json({ error: 'Erro ao atualizar município.' });
     }
   });
 
@@ -532,7 +787,7 @@ async function startServer() {
       res.json({ success: true, message: 'Todos os municípios foram limpos com sucesso' });
     } catch (error: any) {
       console.error('Error deleting all municipios:', error);
-      res.status(500).json({ error: 'Erro ao limpar municípios', details: error.message });
+      res.status(500).json({ error: 'Erro ao limpar municípios.' });
     }
   });
 
@@ -542,7 +797,7 @@ async function startServer() {
       res.json({ success: true, message: 'Município removido com sucesso' });
     } catch (error: any) {
       console.error('Error deleting municipio:', error);
-      res.status(500).json({ error: 'Erro ao remover município', details: error.message });
+      res.status(500).json({ error: 'Erro ao remover município.' });
     }
   });
 
@@ -575,7 +830,7 @@ async function startServer() {
       res.json(formatted);
     } catch (error: any) {
       console.error('Error fetching mercados:', error);
-      res.status(500).json({ error: 'Erro ao buscar mercados', details: error.message });
+      res.status(500).json({ error: 'Erro ao buscar mercados.' });
     }
   });
 
@@ -597,7 +852,7 @@ async function startServer() {
       res.status(201).json(result[0]);
     } catch (error: any) {
       console.error('Error creating mercado:', error);
-      res.status(500).json({ error: 'Erro ao criar mercado', details: error.message });
+      res.status(500).json({ error: 'Erro ao criar mercado.' });
     }
   });
 
@@ -624,7 +879,7 @@ async function startServer() {
       res.json(result[0] || { success: true });
     } catch (error: any) {
       console.error('Error updating mercado:', error);
-      res.status(500).json({ error: 'Erro ao atualizar mercado', details: error.message });
+      res.status(500).json({ error: 'Erro ao atualizar mercado.' });
     }
   });
 
@@ -634,7 +889,7 @@ async function startServer() {
       res.json({ success: true, message: 'Todos os mercados foram limpos com sucesso' });
     } catch (error: any) {
       console.error('Error deleting all mercados:', error);
-      res.status(500).json({ error: 'Erro ao limpar mercados', details: error.message });
+      res.status(500).json({ error: 'Erro ao limpar mercados.' });
     }
   });
 
@@ -644,7 +899,7 @@ async function startServer() {
       res.json({ success: true, message: 'Mercado removido com sucesso' });
     } catch (error: any) {
       console.error('Error deleting mercado:', error);
-      res.status(500).json({ error: 'Erro ao remover mercado', details: error.message });
+      res.status(500).json({ error: 'Erro ao remover mercado.' });
     }
   });
 
@@ -660,13 +915,23 @@ async function startServer() {
         result = await db.select().from(agentes);
       }
       const formatted = result.map(a => ({
-        ...a,
+        id: a.id,
+        foto: a.foto,
+        nome: a.nome,
+        telefone: a.telefone,
+        email: a.email,
+        usuario: a.usuario,
+        mercadoId: a.mercadoId,
+        municipioId: a.municipioId,
+        cargo: a.cargo,
+        status: a.status,
+        resetSenhaPending: a.resetSenhaPending,
         permissoes: a.permissoes ? a.permissoes.split(',') : []
       }));
       res.json(formatted);
     } catch (error: any) {
       console.error('Error fetching agentes:', error);
-      res.status(500).json({ error: 'Erro ao buscar agentes', details: error.message });
+      res.status(500).json({ error: 'Erro ao buscar agentes.' });
     }
   });
 
@@ -674,6 +939,10 @@ async function startServer() {
     try {
       const b = req.body;
       const permissoes = b.permissoes;
+      if (b.senha !== undefined && b.senha !== null && (typeof b.senha !== 'string' || b.senha.length < 12 || b.senha.length > 128)) {
+        return res.status(400).json({ error: 'A senha deve ter entre 12 e 128 caracteres.' });
+      }
+      const temporaryPassword = b.senhaTemporaria || b.senha_temporaria || null;
       const value = {
         id: b.id || `agent-${Date.now()}`,
         foto: b.foto || null,
@@ -686,87 +955,124 @@ async function startServer() {
         cargo: b.cargo || 'Fiscal de Terreno',
         status: b.status || 'ativo',
         permissoes: Array.isArray(permissoes) ? permissoes.join(',') : (permissoes || ''),
-        resetSenhaPending: Boolean(b.resetSenhaPending || b.reset_senha_pending),
-        senhaTemporaria: b.senhaTemporaria || b.senha_temporaria || null,
-        senha: b.senha ? hashPassword(b.senha) : null
+        resetSenhaPending: Boolean(b.resetSenhaPending || b.reset_senha_pending || temporaryPassword),
+        senhaTemporaria: temporaryPassword ? await hashPassword(temporaryPassword, { minimumLength: 8 }) : null,
+        senha: b.senha ? await hashPassword(b.senha) : null
       };
       const result = await db.insert(agentes).values(value).returning();
-      res.status(201).json(result[0]);
+      const { senha, senhaTemporaria, ...safeAgent } = result[0];
+      res.status(201).json(safeAgent);
     } catch (error: any) {
       console.error('Error creating agente:', error);
-      res.status(500).json({ error: 'Erro ao criar agente', details: error.message });
+      res.status(500).json({ error: 'Erro ao criar agente.' });
     }
   });
 
   app.put('/api/agentes/:id', async (req, res) => {
     try {
-      const { permissoes, senha_temporaria, reset_senha_pending, senha, ...rest } = req.body;
+      const { permissoes, senha_temporaria, senhaTemporaria, reset_senha_pending, resetSenhaPending, senha, ...rest } = req.body;
       const updateData: any = { ...rest };
       if (permissoes !== undefined) {
         updateData.permissoes = Array.isArray(permissoes) ? permissoes.join(',') : (permissoes || '');
       }
-      if (senha_temporaria !== undefined) {
-        updateData.senhaTemporaria = senha_temporaria;
+      const requestedTemporaryPassword = senhaTemporaria ?? senha_temporaria;
+      if (requestedTemporaryPassword !== undefined) {
+        updateData.senhaTemporaria = requestedTemporaryPassword
+          ? await hashPassword(requestedTemporaryPassword.toUpperCase(), { minimumLength: 8 })
+          : null;
+        if (requestedTemporaryPassword) updateData.resetSenhaPending = true;
       }
-      if (reset_senha_pending !== undefined) {
-        updateData.resetSenhaPending = reset_senha_pending;
+      if (resetSenhaPending !== undefined || reset_senha_pending !== undefined) {
+        updateData.resetSenhaPending = resetSenhaPending ?? reset_senha_pending;
       }
       if (senha !== undefined && senha !== null) {
-        updateData.senha = hashPassword(senha);
+        if (typeof senha !== 'string' || senha.length < 12 || senha.length > 128) {
+          return res.status(400).json({ error: 'A senha deve ter entre 12 e 128 caracteres.' });
+        }
+        updateData.senha = await hashPassword(senha);
       }
       const result = await db.update(agentes)
         .set(updateData)
         .where(eq(agentes.id, req.params.id))
         .returning();
-      res.json(result[0] || { success: true });
+      if (result[0] && (updateData.senha || updateData.senhaTemporaria)) {
+        await createPool().query(
+          'UPDATE auth_sessions SET revoked_at = COALESCE(revoked_at, NOW()) WHERE user_id = $1 AND user_type = $2',
+          [req.params.id, 'agent'],
+        );
+      }
+      if (result[0]) {
+        const { senha: storedPassword, senhaTemporaria: storedTemporaryPassword, ...safeAgent } = result[0];
+        return res.json(safeAgent);
+      }
+      res.json({ success: true });
     } catch (error: any) {
       console.error('Error updating agente:', error);
-      res.status(500).json({ error: 'Erro ao atualizar agente', details: error.message });
+      res.status(500).json({ error: 'Erro ao atualizar agente.' });
     }
   });
 
   // Autenticação para aplicativo móvel de agente
-  app.post('/api/agentes/login', async (req, res) => {
+  app.post('/api/agentes/login', auth.authRateLimit, async (req, res) => {
     try {
       const { usuario, senha } = req.body;
-      if (!usuario || !senha) {
-        return res.status(400).json({ error: 'Usuário e senha são obrigatórios' });
+      if (typeof usuario !== 'string' || usuario.length > 128 || typeof senha !== 'string' || !senha || senha.length > 128) {
+        return res.status(401).json({ error: 'Utilizador ou senha inválidos.' });
       }
 
       const rows = await db.select().from(agentes).where(eq(agentes.usuario, usuario.trim()));
       if (rows.length === 0) {
-        return res.status(401).json({ error: 'Agente não encontrado' });
+        return res.status(401).json({ error: 'Utilizador ou senha inválidos.' });
       }
 
       const agente = rows[0];
       if (agente.status !== 'ativo') {
-        return res.status(403).json({ error: 'Agente inativo no sistema. Contate o administrador.' });
+        return res.status(401).json({ error: 'Utilizador ou senha inválidos.' });
       }
 
-      const inputHashed = hashPassword(senha.trim());
-      const isTempPasswordMatch = agente.senhaTemporaria && agente.senhaTemporaria === senha.trim().toUpperCase();
-      const isRegularPasswordMatch = agente.senha && (agente.senha === senha.trim() || agente.senha === inputHashed);
-      const isDefaultInitialMatch = !agente.senha && !agente.senhaTemporaria; // Permite primeiro acesso se não tiver senha definida
-
-      if (isTempPasswordMatch || isRegularPasswordMatch || isDefaultInitialMatch) {
-        const { senha: _, senhaTemporaria: __, ...safeAgente } = agente;
-        return res.json({
-          success: true,
-          agente: {
-            ...safeAgente,
-            permissoes: agente.permissoes ? agente.permissoes.split(',') : []
-          },
-          resetSenhaPending: Boolean(agente.resetSenhaPending || isTempPasswordMatch),
-          message: agente.resetSenhaPending || isTempPasswordMatch
-            ? 'Acesso efetuado com senha temporária. É obrigatório definir uma nova senha.'
-            : 'Login realizado com sucesso.'
-        });
+      const regularCheck = await verifyStoredPassword(senha.trim(), agente.senha || '');
+      const temporaryCheck = await verifyStoredPassword(senha.trim().toUpperCase(), agente.senhaTemporaria || '');
+      if (!regularCheck.valid && !temporaryCheck.valid) {
+        return res.status(401).json({ error: 'Utilizador ou senha inválidos.' });
       }
 
-      return res.status(401).json({ error: 'Senha incorreta' });
+      if (regularCheck.needsRehash) {
+        await db.update(agentes).set({
+          senha: await hashPassword(senha.trim(), { minimumLength: 1 }),
+        }).where(eq(agentes.id, agente.id));
+      }
+      if (temporaryCheck.needsRehash) {
+        await db.update(agentes).set({
+          senhaTemporaria: await hashPassword(senha.trim().toUpperCase(), { minimumLength: 8 }),
+        }).where(eq(agentes.id, agente.id));
+      }
+      const { senha: storedPassword, senhaTemporaria: storedTemporaryPassword, ...safeAgent } = agente;
+      const mobileAgent = {
+        ...safeAgent,
+        permissoes: agente.permissoes ? agente.permissoes.split(',') : [],
+      };
+      const needsPasswordChange = Boolean(agente.resetSenhaPending || temporaryCheck.valid);
+      return auth.issueSession(
+        req,
+        res,
+        {
+          id: agente.id,
+          nome: agente.nome,
+          email: agente.email,
+          usuario: agente.usuario,
+          municipioId: agente.municipioId,
+          perfil: 'AGENTE',
+          role: 'AGENTE',
+          municipalityId: agente.municipioId,
+          kind: 'agent',
+          mustChangePassword: needsPasswordChange,
+        },
+        undefined,
+        { responseAlias: 'agente', responseData: mobileAgent, resetSenhaPending: needsPasswordChange },
+      );
     } catch (error: any) {
-      console.error('Error in agent login:', error);
-      res.status(500).json({ error: 'Erro ao autenticar agente', details: error.message });
+      console.error('Agent authentication failed.');
+      res.status(500).json({ error: 'Não foi possível autenticar.' });
     }
   });
 
@@ -774,32 +1080,24 @@ async function startServer() {
   app.post('/api/agentes/alterar-senha', async (req, res) => {
     try {
       const { agenteId, usuario, senhaAtual, novaSenha } = req.body;
-      if ((!agenteId && !usuario) || !novaSenha) {
-        return res.status(400).json({ error: 'Dados insuficientes para alterar a senha' });
+      if (req.auth?.kind !== 'agent' || (agenteId && agenteId !== req.auth.id)) {
+        return res.status(403).json({ error: 'Ação não autorizada.' });
+      }
+      if (typeof senhaAtual !== 'string' || !senhaAtual || typeof novaSenha !== 'string' || novaSenha.length < 12 || novaSenha.length > 128) {
+        return res.status(400).json({ error: 'A senha atual e uma nova senha de 12 a 128 caracteres são obrigatórias.' });
       }
 
-      let rows;
-      if (agenteId) {
-        rows = await db.select().from(agentes).where(eq(agentes.id, agenteId));
-      } else {
-        rows = await db.select().from(agentes).where(eq(agentes.usuario, usuario.trim()));
-      }
-
-      if (rows.length === 0) {
-        return res.status(404).json({ error: 'Agente não encontrado' });
-      }
-
+      const rows = await db.select().from(agentes).where(eq(agentes.id, req.auth.id)).limit(1);
       const agente = rows[0];
-      if (senhaAtual) {
-        const inputHashed = hashPassword(senhaAtual.trim());
-        const isTempMatch = agente.senhaTemporaria && agente.senhaTemporaria === senhaAtual.trim().toUpperCase();
-        const isRegularMatch = agente.senha && (agente.senha === senhaAtual.trim() || agente.senha === inputHashed);
-        if (!isTempMatch && !isRegularMatch && (agente.senha || agente.senhaTemporaria)) {
-          return res.status(401).json({ error: 'A senha atual fornecida está incorreta' });
-        }
+      if (!agente || agente.status !== 'ativo') return res.status(401).json({ error: 'Sessão inválida.' });
+
+      const normalMatch = await verifyStoredPassword(senhaAtual, agente.senha || '');
+      const temporaryMatch = await verifyStoredPassword(senhaAtual.toUpperCase(), agente.senhaTemporaria || '');
+      if (!normalMatch.valid && !temporaryMatch.valid) {
+        return res.status(401).json({ error: 'A senha atual está incorreta.' });
       }
 
-      const hashedNovaSenha = hashPassword(novaSenha.trim());
+      const hashedNovaSenha = await hashPassword(novaSenha);
       await db.update(agentes)
         .set({
           senha: hashedNovaSenha,
@@ -808,10 +1106,14 @@ async function startServer() {
         })
         .where(eq(agentes.id, agente.id));
 
+      await createPool().query(
+        'UPDATE auth_sessions SET revoked_at = COALESCE(revoked_at, NOW()) WHERE user_id = $1 AND user_type = $2',
+        [agente.id, 'agent'],
+      );
       res.json({ success: true, message: 'Nova senha pessoal cadastrada com sucesso!' });
     } catch (error: any) {
-      console.error('Error updating agent password:', error);
-      res.status(500).json({ error: 'Erro ao alterar senha', details: error.message });
+      console.error('Agent password update failed.');
+      res.status(500).json({ error: 'Não foi possível alterar a senha.' });
     }
   });
 
@@ -821,7 +1123,7 @@ async function startServer() {
       res.json({ success: true, message: 'Todos os agentes foram limpos com sucesso' });
     } catch (error: any) {
       console.error('Error deleting all agentes:', error);
-      res.status(500).json({ error: 'Erro ao limpar agentes', details: error.message });
+      res.status(500).json({ error: 'Erro ao limpar agentes.' });
     }
   });
 
@@ -831,7 +1133,7 @@ async function startServer() {
       res.json({ success: true, message: 'Agente removido com sucesso' });
     } catch (error: any) {
       console.error('Error deleting agente:', error);
-      res.status(500).json({ error: 'Erro ao remover agente', details: error.message });
+      res.status(500).json({ error: 'Erro ao remover agente.' });
     }
   });
 
@@ -839,94 +1141,236 @@ async function startServer() {
   // 5. Contribuintes (Taxpayers)
   app.get('/api/contribuintes', async (req, res) => {
     try {
+      await reactivateExpiredContributors();
       const tenantId = getTenantFilter(req);
-      let result;
-      if (tenantId) {
-        const joined = await db.select({
-          id: contribuintes.id,
-          nome: contribuintes.nome,
-          telefone: contribuintes.telefone,
-          documento: contribuintes.documento,
-          mercadoId: contribuintes.mercadoId,
-          numBanca: contribuintes.numBanca,
-          categoria: contribuintes.categoria,
-          atividade: contribuintes.atividade,
-          observacoes: contribuintes.observacoes,
-          status: contribuintes.status,
-          qrCode: contribuintes.qrCode,
-          areaM2: contribuintes.areaM2,
-          foto: contribuintes.foto,
-        })
-        .from(contribuintes)
-        .innerJoin(mercados, eq(contribuintes.mercadoId, mercados.id))
-        .where(eq(mercados.municipioId, tenantId));
-        result = joined;
-      } else {
-        result = await db.select().from(contribuintes);
-      }
-      res.json(result);
+      const pageValue = Number(req.query.page ?? 0);
+      const pageSizeValue = Number(req.query.pageSize ?? 100);
+      const page = Number.isSafeInteger(pageValue) && pageValue >= 0 ? pageValue : 0;
+      const pageSize = Number.isSafeInteger(pageSizeValue)
+        ? Math.max(1, Math.min(pageSizeValue, 100))
+        : 100;
+      const search = typeof req.query.search === 'string' ? req.query.search.trim().slice(0, 120) : '';
+      res.json(await getContributorsPage(tenantId, page, pageSize, search));
     } catch (error: any) {
       console.error('Error fetching contribuintes:', error);
-      res.status(500).json({ error: 'Erro ao buscar contribuintes', details: error.message });
+      res.status(500).json({ error: 'Erro ao buscar contribuintes.' });
     }
   });
 
   app.post('/api/contribuintes', async (req, res) => {
     try {
       const b = req.body;
+      const nome = typeof b.nome === 'string' ? b.nome.trim() : '';
+      const documento = typeof b.documento === 'string' ? b.documento.trim() : '';
+      const mercadoId = typeof (b.mercadoId ?? b.mercado_id) === 'string' ? (b.mercadoId ?? b.mercado_id).trim() : '';
+      const numBanca = typeof (b.numBanca ?? b.num_banca) === 'string' ? (b.numBanca ?? b.num_banca).trim() : '';
+      const categoria = typeof b.categoria === 'string' ? b.categoria.trim() : '';
+      const dimensao = typeof b.dimensao === 'string' ? b.dimensao.trim() : '';
+      if (!nome || !documento || !mercadoId || !numBanca || !categoria || !['Micro', 'Pequeno', 'Médio', 'Grande'].includes(dimensao)) {
+        return res.status(400).json({ error: 'Preencha nome, NIF, mercado, número da banca, categoria e dimensão válidos.' });
+      }
+      const [market, category] = await Promise.all([
+        db.select({ id: mercados.id }).from(mercados).where(eq(mercados.id, mercadoId)).limit(1),
+        db.select({ id: categoriasContribuintes.id, status: categoriasContribuintes.status }).from(categoriasContribuintes)
+          .where(eq(categoriasContribuintes.id, categoria)).limit(1),
+      ]);
+      if (!market.length) return res.status(400).json({ error: 'Selecione um mercado válido.' });
+      if (!category.length || category[0].status !== 'ativo') {
+        return res.status(400).json({ error: 'Selecione uma categoria de contribuinte ativa.' });
+      }
+      const agenteId = await resolveContributorRegistrationAgent(req);
+      const areaM2 = b.areaM2 !== undefined && b.areaM2 !== null && b.areaM2 !== '' ? Number(b.areaM2) : 0;
+      if (!Number.isFinite(areaM2) || areaM2 < 0) {
+        return res.status(400).json({ error: 'A área deve ser um número igual ou superior a zero.' });
+      }
       const value = {
         id: b.id || `cont-${Date.now()}`,
-        nome: b.nome || 'Contribuinte Indefinido',
-        telefone: b.telefone || '',
-        documento: b.documento || '',
-        mercadoId: b.mercadoId || b.mercado_id || 'merc-1',
-        numBanca: b.numBanca || b.num_banca || '',
-        categoria: b.categoria || 'Feirante',
-        atividade: b.atividade || '',
-        observacoes: b.observacoes || b.observacao || '',
+        nome,
+        telefone: typeof b.telefone === 'string' ? b.telefone.trim() : '',
+        documento: documento.toUpperCase(),
+        mercadoId,
+        numBanca: numBanca.toUpperCase(),
+        categoria,
+        atividade: typeof b.atividade === 'string' ? b.atividade.trim() : '',
+        dimensao,
+        dataRegistro: new Date(),
+        agenteId,
+        observacoes: typeof (b.observacoes ?? b.observacao) === 'string' ? (b.observacoes ?? b.observacao).trim() : '',
         status: b.status || 'ativo',
-        qrCode: b.qrCode || b.qr_code || null,
-        areaM2: b.areaM2 !== undefined && b.areaM2 !== null && b.areaM2 !== '' ? Number(b.areaM2) : null,
+        qrCode: typeof (b.qrCode ?? b.qr_code) === 'string' && (b.qrCode ?? b.qr_code).trim()
+          ? (b.qrCode ?? b.qr_code).trim()
+          : null,
+        areaM2,
         foto: b.foto || null
       };
       const result = await db.insert(contribuintes).values(value).returning();
       res.status(201).json(result[0]);
     } catch (error: any) {
       console.error('Error creating contribuinte:', error);
-      res.status(500).json({ error: 'Erro ao criar contribuinte', details: error.message });
+      res.status(500).json({ error: 'Erro ao criar contribuinte.' });
     }
   });
 
   app.put('/api/contribuintes/:id', async (req, res) => {
     try {
+      const existing = await db.select().from(contribuintes).where(eq(contribuintes.id, req.params.id)).limit(1);
+      if (!existing.length) return res.status(404).json({ error: 'Contribuinte não encontrado.' });
+      if (req.auth?.kind === 'agent') {
+        const keys = Object.keys(req.body || {});
+        if (
+          keys.some(key => !['status', 'reativarEm'].includes(key))
+          || !['ativo', 'inativo'].includes(req.body?.status)
+          || (req.body.status === 'ativo' && req.body.reativarEm != null)
+          || (req.body.reativarEm != null && typeof req.body.reativarEm !== 'string')
+        ) {
+          return res.status(400).json({ error: 'O agente pode alterar apenas o estado e a data de reativação.' });
+        }
+        let reativarEm: string | null;
+        try {
+          reativarEm = req.body.status === 'inativo'
+            ? await validateReactivationDate(req.body.reativarEm)
+            : null;
+        } catch (error) {
+          return res.status(400).json({
+            error: error instanceof Error ? error.message : 'A data de reativação é inválida.',
+          });
+        }
+        const [updated] = await db.update(contribuintes)
+          .set({ status: req.body.status, reativarEm })
+          .where(eq(contribuintes.id, req.params.id))
+          .returning();
+        return res.json(updated);
+      }
+      const merged = { ...existing[0], ...req.body };
+      const nome = typeof merged.nome === 'string' ? merged.nome.trim() : '';
+      const documento = typeof merged.documento === 'string' ? merged.documento.trim() : '';
+      const mercadoId = typeof merged.mercadoId === 'string' ? merged.mercadoId.trim() : '';
+      const numBanca = typeof merged.numBanca === 'string' ? merged.numBanca.trim() : '';
+      const categoria = typeof merged.categoria === 'string' ? merged.categoria.trim() : '';
+      const dimensao = typeof merged.dimensao === 'string' ? merged.dimensao.trim() : '';
+      if (!nome || !documento || !mercadoId || !numBanca || !categoria || !['Micro', 'Pequeno', 'Médio', 'Grande'].includes(dimensao)) {
+        return res.status(400).json({ error: 'Preencha nome, NIF, mercado, número da banca, categoria e dimensão válidos.' });
+      }
+      const [market, category] = await Promise.all([
+        db.select({ id: mercados.id }).from(mercados).where(eq(mercados.id, mercadoId)).limit(1),
+        db.select({ id: categoriasContribuintes.id, status: categoriasContribuintes.status }).from(categoriasContribuintes)
+          .where(eq(categoriasContribuintes.id, categoria)).limit(1),
+      ]);
+      if (!market.length) return res.status(400).json({ error: 'Selecione um mercado válido.' });
+      if (!category.length || (category[0].status !== 'ativo' && categoria !== existing[0].categoria)) {
+        return res.status(400).json({ error: 'Selecione uma categoria de contribuinte ativa.' });
+      }
+      const areaM2 = Number(merged.areaM2 ?? 0);
+      if (!Number.isFinite(areaM2) || areaM2 < 0) {
+        return res.status(400).json({ error: 'A área deve ser um número igual ou superior a zero.' });
+      }
+      const updates = {
+        nome,
+        telefone: typeof merged.telefone === 'string' ? merged.telefone.trim() : '',
+        documento: documento.toUpperCase(),
+        mercadoId,
+        numBanca: numBanca.toUpperCase(),
+        categoria,
+        atividade: typeof merged.atividade === 'string' ? merged.atividade.trim() : '',
+        dimensao,
+        observacoes: typeof merged.observacoes === 'string' ? merged.observacoes.trim() : '',
+        status: merged.status,
+        reativarEm: merged.status === 'inativo' ? (merged.reativarEm || null) : null,
+        qrCode: typeof merged.qrCode === 'string' && merged.qrCode.trim() ? merged.qrCode.trim() : null,
+        areaM2,
+        foto: merged.foto || null,
+      };
+      if (!['ativo', 'inativo'].includes(updates.status)) {
+        return res.status(400).json({ error: 'Selecione um estado válido para o contribuinte.' });
+      }
+      try {
+        updates.reativarEm = updates.status === 'inativo'
+          ? await validateReactivationDate(updates.reativarEm)
+          : null;
+      } catch (error) {
+        return res.status(400).json({
+          error: error instanceof Error ? error.message : 'A data de reativação é inválida.',
+        });
+      }
       const result = await db.update(contribuintes)
-        .set(req.body)
+        .set(updates)
         .where(eq(contribuintes.id, req.params.id))
         .returning();
       res.json(result[0] || { success: true });
     } catch (error: any) {
       console.error('Error updating contribuinte:', error);
-      res.status(500).json({ error: 'Erro ao atualizar contribuinte', details: error.message });
+      res.status(500).json({ error: 'Erro ao atualizar contribuinte.' });
+    }
+  });
+
+  app.get('/api/categoria_contribuintes', async (_req, res) => {
+    try {
+      const result = await db.select().from(categoriasContribuintes).orderBy(categoriasContribuintes.nome);
+      res.json(result);
+    } catch (error: any) {
+      console.error('Error fetching contributor categories:', error);
+      res.status(500).json({ error: 'Erro ao buscar categorias de contribuintes.' });
+    }
+  });
+
+  app.post('/api/categoria_contribuintes', async (req, res) => {
+    try {
+      const nome = typeof req.body?.nome === 'string' ? req.body.nome.trim() : '';
+      const descricao = typeof req.body?.descricao === 'string' ? req.body.descricao.trim() : '';
+      if (!nome) return res.status(400).json({ error: 'O nome da categoria é obrigatório.' });
+      const result = await db.insert(categoriasContribuintes).values({
+        id: req.body.id || `categoria-${Date.now()}`,
+        nome,
+        descricao,
+        status: req.body.status === 'inativo' ? 'inativo' : 'ativo',
+      }).returning();
+      res.status(201).json(result[0]);
+    } catch (error: any) {
+      if (error?.code === '23505') return res.status(409).json({ error: 'Já existe uma categoria com esse nome.' });
+      console.error('Error creating contributor category:', error);
+      res.status(500).json({ error: 'Erro ao criar categoria de contribuinte.' });
+    }
+  });
+
+  app.put('/api/categoria_contribuintes/:id', async (req, res) => {
+    try {
+      const nome = typeof req.body?.nome === 'string' ? req.body.nome.trim() : '';
+      const descricao = typeof req.body?.descricao === 'string' ? req.body.descricao.trim() : '';
+      if (!nome) return res.status(400).json({ error: 'O nome da categoria é obrigatório.' });
+      const result = await db.update(categoriasContribuintes)
+        .set({ nome, descricao, status: req.body.status === 'inativo' ? 'inativo' : 'ativo' })
+        .where(eq(categoriasContribuintes.id, req.params.id))
+        .returning();
+      if (!result.length) return res.status(404).json({ error: 'Categoria não encontrada.' });
+      res.json(result[0]);
+    } catch (error: any) {
+      if (error?.code === '23505') return res.status(409).json({ error: 'Já existe uma categoria com esse nome.' });
+      console.error('Error updating contributor category:', error);
+      res.status(500).json({ error: 'Erro ao atualizar categoria de contribuinte.' });
     }
   });
 
   app.delete('/api/contribuintes/all', async (req, res) => {
     try {
-      await db.delete(contribuintes);
-      res.json({ success: true, message: 'Todos os contribuintes foram limpos com sucesso' });
+      await db.update(contribuintes).set({ status: 'inativo', reativarEm: null });
+      res.json({ success: true, message: 'Todos os contribuintes foram desativados sem remover os seus dados.' });
     } catch (error: any) {
-      console.error('Error deleting all contribuintes:', error);
-      res.status(500).json({ error: 'Erro ao limpar contribuintes', details: error.message });
+      console.error('Error deactivating all contribuintes:', error);
+      res.status(500).json({ error: 'Erro ao desativar contribuintes.' });
     }
   });
 
   app.delete('/api/contribuintes/:id', async (req, res) => {
     try {
-      await db.delete(contribuintes).where(eq(contribuintes.id, req.params.id));
-      res.json({ success: true, message: 'Contribuinte removido com sucesso' });
+      const [result] = await db.update(contribuintes)
+        .set({ status: 'inativo', reativarEm: null })
+        .where(eq(contribuintes.id, req.params.id))
+        .returning({ id: contribuintes.id });
+      if (!result) return res.status(404).json({ error: 'Contribuinte não encontrado.' });
+      res.json({ success: true, message: 'Contribuinte desativado sem remover os seus dados.' });
     } catch (error: any) {
       console.error('Error deleting contribuinte:', error);
-      res.status(500).json({ error: 'Erro ao remover contribuinte', details: error.message });
+      res.status(500).json({ error: 'Erro ao remover contribuinte.' });
     }
   });
 
@@ -938,7 +1382,7 @@ async function startServer() {
       res.json(result);
     } catch (error: any) {
       console.error('Error fetching tiposReceita:', error);
-      res.status(500).json({ error: 'Erro ao buscar tipos de receita', details: error.message });
+      res.status(500).json({ error: 'Erro ao buscar tipos de receita.' });
     }
   });
 
@@ -948,7 +1392,7 @@ async function startServer() {
       res.status(201).json(result[0]);
     } catch (error: any) {
       console.error('Error creating tipo_receita:', error);
-      res.status(500).json({ error: 'Erro ao criar tipo de receita', details: error.message });
+      res.status(500).json({ error: 'Erro ao criar tipo de receita.' });
     }
   });
 
@@ -961,7 +1405,7 @@ async function startServer() {
       res.json(result[0] || { success: true });
     } catch (error: any) {
       console.error('Error updating tipo_receita:', error);
-      res.status(500).json({ error: 'Erro ao atualizar tipo de receita', details: error.message });
+      res.status(500).json({ error: 'Erro ao atualizar tipo de receita.' });
     }
   });
 
@@ -971,7 +1415,7 @@ async function startServer() {
       res.json({ success: true, message: 'Todos os tipos de receita foram limpos com sucesso' });
     } catch (error: any) {
       console.error('Error deleting all tipos_receita:', error);
-      res.status(500).json({ error: 'Erro ao limpar tipos de receita', details: error.message });
+      res.status(500).json({ error: 'Erro ao limpar tipos de receita.' });
     }
   });
 
@@ -981,7 +1425,7 @@ async function startServer() {
       res.json({ success: true, message: 'Tipo de receita removido com sucesso' });
     } catch (error: any) {
       console.error('Error deleting tipo_receita:', error);
-      res.status(500).json({ error: 'Erro ao remover tipo de receita', details: error.message });
+      res.status(500).json({ error: 'Erro ao remover tipo de receita.' });
     }
   });
 
@@ -991,7 +1435,9 @@ async function startServer() {
     try {
       const tenantId = getTenantFilter(req);
       let result;
-      if (tenantId) {
+      if (req.auth?.kind === 'agent') {
+        result = await db.select().from(pagamentos).where(eq(pagamentos.agenteId, req.auth.id));
+      } else if (tenantId) {
         result = await db.select().from(pagamentos).where(eq(pagamentos.municipioId, tenantId));
       } else {
         result = await db.select().from(pagamentos);
@@ -999,14 +1445,20 @@ async function startServer() {
       res.json(result);
     } catch (error: any) {
       console.error('Error fetching pagamentos:', error);
-      res.status(500).json({ error: 'Erro ao buscar pagamentos', details: error.message });
+      res.status(500).json({ error: 'Erro ao buscar pagamentos.' });
     }
   });
 
   app.post('/api/pagamentos', async (req, res) => {
     try {
-      const normalized = await normalizePagamentoPayload(req.body);
+      const normalized = await normalizePagamentoPayload(req.body, req.auth);
       const existing = await db.select().from(pagamentos).where(eq(pagamentos.id, normalized.id)).limit(1);
+      if (existing[0] && (
+        existing[0].municipioId !== normalized.municipioId
+        || (req.auth?.kind === 'agent' && existing[0].agenteId !== req.auth.id)
+      )) {
+        return res.status(409).json({ error: 'O identificador do pagamento já está em uso.' });
+      }
       let result;
       if (existing.length > 0) {
         result = await db.update(pagamentos)
@@ -1019,7 +1471,7 @@ async function startServer() {
       res.status(201).json(result[0]);
     } catch (error: any) {
       console.error('Error creating pagamento:', error);
-      res.status(500).json({ error: 'Erro ao registrar pagamento', details: error.message });
+      res.status(500).json({ error: 'Erro ao registrar pagamento.' });
     }
   });
 
@@ -1031,7 +1483,7 @@ async function startServer() {
         return res.status(404).json({ error: 'Pagamento não encontrado' });
       }
       const merged = { ...existing[0], ...req.body, id };
-      const normalized = await normalizePagamentoPayload(merged);
+      const normalized = await normalizePagamentoPayload(merged, req.auth);
       const result = await db.update(pagamentos)
         .set(normalized)
         .where(eq(pagamentos.id, id))
@@ -1039,7 +1491,7 @@ async function startServer() {
       res.json(result[0] || { success: true });
     } catch (error: any) {
       console.error('Error updating pagamento:', error);
-      res.status(500).json({ error: 'Erro ao atualizar pagamento', details: error.message });
+      res.status(500).json({ error: 'Erro ao atualizar pagamento.' });
     }
   });
 
@@ -1049,7 +1501,7 @@ async function startServer() {
       res.json({ success: true, message: 'Todos os pagamentos e recibos foram limpos com sucesso' });
     } catch (error: any) {
       console.error('Error deleting all pagamentos:', error);
-      res.status(500).json({ error: 'Erro ao limpar todos os pagamentos', details: error.message });
+      res.status(500).json({ error: 'Erro ao limpar todos os pagamentos.' });
     }
   });
 
@@ -1059,7 +1511,7 @@ async function startServer() {
       res.json({ success: true, message: 'Pagamento removido com sucesso' });
     } catch (error: any) {
       console.error('Error deleting pagamento:', error);
-      res.status(500).json({ error: 'Erro ao remover pagamento', details: error.message });
+      res.status(500).json({ error: 'Erro ao remover pagamento.' });
     }
   });
 
@@ -1071,17 +1523,32 @@ async function startServer() {
       res.json(result);
     } catch (error: any) {
       console.error('Error fetching auditoria logs:', error);
-      res.status(500).json({ error: 'Erro ao buscar logs de auditoria', details: error.message });
+      res.status(500).json({ error: 'Erro ao buscar logs de auditoria.' });
     }
   });
 
   app.post('/api/auditoria', async (req, res) => {
     try {
-      const result = await db.insert(auditoriaLog).values(req.body).returning();
+      const { acao, descricao } = req.body || {};
+      if (typeof acao !== 'string' || acao.length > 100 || typeof descricao !== 'string' || descricao.length > 2000) {
+        return res.status(400).json({ error: 'Dados de auditoria inválidos.' });
+      }
+      const now = new Date();
+      const result = await db.insert(auditoriaLog).values({
+        id: `audit-${now.getTime()}-${Math.random().toString(36).slice(2, 8)}`,
+        usuario: req.auth?.email || req.auth?.id || 'unknown',
+        perfil: req.auth?.role || 'unknown',
+        data: now.toISOString().slice(0, 10),
+        hora: now.toISOString().slice(11, 19),
+        ip: req.ip || 'unknown',
+        dispositivo: req.get('x-client-type') || 'unknown',
+        acao,
+        descricao,
+      }).returning();
       res.status(201).json(result[0]);
     } catch (error: any) {
       console.error('Error creating auditoria log:', error);
-      res.status(500).json({ error: 'Erro ao criar log de auditoria', details: error.message });
+      res.status(500).json({ error: 'Erro ao criar log de auditoria.' });
     }
   });
 
@@ -1091,7 +1558,7 @@ async function startServer() {
       res.json({ success: true, message: 'Todos os logs de auditoria foram limpos com sucesso' });
     } catch (error: any) {
       console.error('Error deleting all auditoria logs:', error);
-      res.status(500).json({ error: 'Erro ao limpar logs de auditoria', details: error.message });
+      res.status(500).json({ error: 'Erro ao limpar logs de auditoria.' });
     }
   });
 
@@ -1103,17 +1570,28 @@ async function startServer() {
       res.json(result);
     } catch (error: any) {
       console.error('Error fetching sincronizacao logs:', error);
-      res.status(500).json({ error: 'Erro ao buscar logs de sincronização', details: error.message });
+      res.status(500).json({ error: 'Erro ao buscar logs de sincronização.' });
     }
   });
 
   app.post('/api/sincronizacao', async (req, res) => {
     try {
-      const result = await db.insert(sincronizacaoLog).values(req.body).returning();
+      if (req.auth?.kind !== 'agent') return res.status(403).json({ error: 'Ação não autorizada.' });
+      const registrosSincronizados = Number(req.body?.registrosSincronizados);
+      if (!Number.isSafeInteger(registrosSincronizados) || registrosSincronizados < 0) {
+        return res.status(400).json({ error: 'Contagem de sincronização inválida.' });
+      }
+      const result = await db.insert(sincronizacaoLog).values({
+        id: `sync-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        agenteId: req.auth.id,
+        ultimaSincronizacao: new Date().toISOString(),
+        registrosSincronizados,
+        status: 'sucesso',
+      }).returning();
       res.status(201).json(result[0]);
     } catch (error: any) {
       console.error('Error creating sincronizacao log:', error);
-      res.status(500).json({ error: 'Erro ao criar log de sincronização', details: error.message });
+      res.status(500).json({ error: 'Erro ao criar log de sincronização.' });
     }
   });
 
@@ -1123,7 +1601,7 @@ async function startServer() {
       res.json({ success: true, message: 'Todos os logs de sincronização foram limpos com sucesso' });
     } catch (error: any) {
       console.error('Error deleting all sincronizacao logs:', error);
-      res.status(500).json({ error: 'Erro ao limpar logs de sincronização', details: error.message });
+      res.status(500).json({ error: 'Erro ao limpar logs de sincronização.' });
     }
   });
 
@@ -1133,7 +1611,7 @@ async function startServer() {
       const https = await import('https');
       const bridgeUrl = 'https://receita.audicontabissau.gw/api-bridge.php?action=all';
       const bridgeData: any = await new Promise((resolve, reject) => {
-        const req = https.get(bridgeUrl, { rejectUnauthorized: false, timeout: 10000 }, (res) => {
+        const req = https.get(bridgeUrl, { timeout: 10000 }, (res) => {
           let raw = '';
           res.on('data', (c) => raw += c);
           res.on('end', () => {
@@ -1209,26 +1687,46 @@ async function startServer() {
             cargo: a.cargo,
             status: a.status || 'ativo',
             permissoes: a.permissoes || '',
-            senha: a.senha || ''
+            senha: await hashImportedPassword(a.senha)
           }).onConflictDoNothing();
         }
       }
 
       if (bridgeData.contribuintes?.length) {
         for (const c of bridgeData.contribuintes) {
+          const nome = typeof c.nome === 'string' ? c.nome.trim() : '';
+          const documento = typeof c.documento === 'string' ? c.documento.trim() : '';
+          const mercadoId = typeof c.mercado_id === 'string' ? c.mercado_id.trim() : '';
+          const numBanca = typeof c.num_banca === 'string' ? c.num_banca.trim() : '';
+          if (!c.id || !nome || !documento || !mercadoId || !numBanca) {
+            console.warn('Skipped bridge contributor without required name, NIF, market, stall number, or id.');
+            continue;
+          }
+          const classification = classifyImportedContributor(c.atividade, c.categoria);
+          const [category] = await db.select({ id: categoriasContribuintes.id })
+            .from(categoriasContribuintes)
+            .where(eq(categoriasContribuintes.nome, classification.categoria))
+            .limit(1);
+          if (!category) {
+            console.warn('Skipped bridge contributor because its category is not configured.');
+            continue;
+          }
           await db.insert(contribuintes).values({
             id: c.id,
-            nome: c.nome,
-            telefone: c.telefone,
-            documento: c.documento,
-            mercadoId: c.mercado_id,
-            numBanca: c.num_banca,
-            categoria: c.categoria,
-            atividade: c.atividade,
-            observacoes: c.observacoes,
+            nome,
+            telefone: typeof c.telefone === 'string' ? c.telefone.trim() : '',
+            documento: documento.toUpperCase(),
+            mercadoId,
+            numBanca: numBanca.toUpperCase(),
+            categoria: category.id,
+            atividade: classification.atividade,
+            dimensao: classification.dimensao,
+            dataRegistro: new Date(),
+            agenteId: LEGACY_REGISTRATION_AGENT_ID,
+            observacoes: typeof c.observacoes === 'string' ? c.observacoes.trim() : '',
             status: c.status || 'ativo',
-            qrCode: c.qr_code,
-            areaM2: parseFloat(c.area_m2 || '0'),
+            qrCode: typeof c.qr_code === 'string' && c.qr_code.trim() ? c.qr_code.trim() : null,
+            areaM2: c.area_m2 !== undefined && c.area_m2 !== null && c.area_m2 !== '' ? parseFloat(c.area_m2) : 0,
             foto: c.foto || ''
           }).onConflictDoNothing();
         }
@@ -1262,7 +1760,6 @@ async function startServer() {
             dataPagamento: p.data_pagamento,
             status: p.status || 'pago',
             observacao: p.observacao,
-            comprovativoUrl: p.comprovativo_url,
             dataCriacao: p.data_criacao || p.data_pagamento
           }).onConflictDoNothing();
         }
@@ -1278,7 +1775,7 @@ async function startServer() {
             perfil: u.perfil || 'Supervisor',
             status: u.status || 'ativo',
             usuario: u.usuario || u.username,
-            senha: u.senha || '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92'
+            senha: await hashImportedPassword(u.senha)
           }).onConflictDoNothing();
         }
       }
@@ -1308,7 +1805,7 @@ async function startServer() {
       res.json({ success: true, message: 'Todos os dados operacionais do sistema foram redefinidos e zerados com sucesso' });
     } catch (error: any) {
       console.error('Error in reset-all endpoint:', error);
-      res.status(500).json({ error: 'Erro ao redefinir base de dados', details: error.message });
+      res.status(500).json({ error: 'Erro ao redefinir base de dados.' });
     }
   });
 
@@ -1320,7 +1817,7 @@ async function startServer() {
       res.json(result[0] || {});
     } catch (error: any) {
       console.error('Error fetching configuracoes:', error);
-      res.status(500).json({ error: 'Erro ao buscar configurações', details: error.message });
+      res.status(500).json({ error: 'Erro ao buscar configurações.' });
     }
   });
 
@@ -1333,14 +1830,15 @@ async function startServer() {
       res.json(result[0] || { success: true });
     } catch (error: any) {
       console.error('Error updating configuracoes:', error);
-      res.status(500).json({ error: 'Erro ao atualizar configurações', details: error.message });
+      res.status(500).json({ error: 'Erro ao atualizar configurações.' });
     }
   });
 
   // --- VITE DEV / PRODUCTION HANDLERS ---
   const distPath = path.resolve(process.cwd(), 'dist');
   const hasDist = fs.existsSync(path.join(distPath, 'index.html'));
-  const isProduction = process.env.NODE_ENV === "production" || hasDist;
+  const isProduction = process.env.NODE_ENV === "production"
+    || (hasDist && process.env.NODE_ENV !== "development");
 
   if (!isProduction) {
     const { createServer: createViteServer } = await import('vite');
@@ -1368,6 +1866,12 @@ async function startServer() {
     console.log(`Server running on port ${PORT}`);
     // Run DB initialization in background without blocking server startup / Cloud Run healthchecks
     initializeDatabase().then(async () => {
+      await reactivateExpiredContributors();
+      setInterval(() => {
+        reactivateExpiredContributors().catch(error => {
+          console.error('Failed to reactivate contributors whose scheduled date has arrived:', error);
+        });
+      }, 60_000);
       console.log('Synchronizing initial data from PlanetHoster bridge...');
       await syncFromPlanetHosterBridge();
     }).catch((err) => {

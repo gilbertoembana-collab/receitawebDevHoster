@@ -81,11 +81,23 @@ export interface Contribuinte {
   numBanca: string;
   categoria: string;
   atividade: string;
+  dimensao: 'Micro' | 'Pequeno' | 'Médio' | 'Grande';
+  dataRegistro: string;
+  agenteId: string;
+  agenteNome?: string;
   observacoes: string;
   status: 'ativo' | 'inativo';
-  qrCode?: string;
+  reativarEm?: string | null;
+  qrCode?: string | null;
   areaM2?: number;
   foto?: string;
+}
+
+export interface CategoriaContribuinte {
+  id: string;
+  nome: string;
+  descricao: string;
+  status: 'ativo' | 'inativo';
 }
 
 export type PeriodicidadeTaxa = 'Diária' | 'Semanal' | 'Mensal' | 'Anual' | 'Outros';

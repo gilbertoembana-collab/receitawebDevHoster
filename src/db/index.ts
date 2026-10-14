@@ -32,13 +32,19 @@ export const createPool = () => {
     }
 
     const parsedUrl = new URL(dbUrl);
-    const isSsl = parsedUrl.searchParams.get('sslmode') === 'require' || parsedUrl.hostname.includes('supabase');
+    const isLocalDatabase = ['localhost', '127.0.0.1', '::1'].includes(parsedUrl.hostname);
+    if (isLocalDatabase && process.env.NODE_ENV !== 'production') {
+      parsedUrl.searchParams.set('sslmode', 'disable');
+    }
+    const isSslRequired = parsedUrl.searchParams.get('sslmode') === 'require'
+      || parsedUrl.hostname.includes('supabase')
+      || (process.env.NODE_ENV === 'production' && !isLocalDatabase);
     global._postgresPool = new Pool({
-      connectionString: dbUrl,
+      connectionString: parsedUrl.toString(),
       max: 15,
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 10000,
-      ssl: isSsl ? { rejectUnauthorized: false } : false,
+      ssl: isSslRequired ? { rejectUnauthorized: true } : undefined,
     });
 
     // Prevent unhandled pool-level errors from crashing the application

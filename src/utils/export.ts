@@ -35,6 +35,16 @@ export function exportToExcel(data: any[][], headers: string[], filename: string
   document.body.removeChild(link);
 }
 
+function escapeHtml(value: unknown): string {
+  return String(value ?? '').replace(/[&<>"']/g, character => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  })[character] || character);
+}
+
 export function printToPDF(title: string, headers: string[], rows: any[][]) {
   const printWindow = window.open('', '_blank');
   if (!printWindow) {
@@ -44,14 +54,14 @@ export function printToPDF(title: string, headers: string[], rows: any[][]) {
 
   const tableHeaders = headers.map(h => `
     <th style="padding: 10px; border-bottom: 2px solid #cbd5e1; text-align: left; background-color: #f8fafc; color: #1e293b; font-weight: 600; font-size: 13px;">
-      ${h}
+      ${escapeHtml(h)}
     </th>
   `).join('');
 
   const tableRows = rows.map(row => {
     const cells = row.map(cell => `
       <td style="padding: 10px; border-bottom: 1px solid #e2e8f0; color: #334155; font-size: 12px; white-space: pre-wrap;">
-        ${cell !== null && cell !== undefined ? cell : ''}
+        ${escapeHtml(cell)}
       </td>
     `).join('');
     return `<tr>${cells}</tr>`;
@@ -105,7 +115,7 @@ export function printToPDF(title: string, headers: string[], rows: any[][]) {
     <body>
       <div class="header">
         <div>
-          <div class="title">${title}</div>
+          <div class="title">${escapeHtml(title)}</div>
           <div style="font-size: 12px; color: #64748b; margin-top: 5px;">Relatório de Dados do Sistema</div>
         </div>
         <div class="meta">

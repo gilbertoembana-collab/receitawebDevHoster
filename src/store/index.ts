@@ -1,9 +1,11 @@
 import { create } from 'zustand';
 import { 
   Municipio, Mercado, Agente, Contribuinte, TipoReceita, 
-  Pagamento, AuditoriaLog, SincronizacaoLog, SystemConfig, Usuario, UserProfile 
+  Pagamento, AuditoriaLog, SincronizacaoLog, SystemConfig, Usuario, UserProfile,
+  CategoriaContribuinte
 } from '../types';
 import { dbService } from '../services/db';
+import { apiFetch, logoutSession } from '../services/api';
 
 interface NotificationItem {
   id: string;
@@ -28,6 +30,7 @@ interface AppStore {
   mercados: Mercado[];
   agentes: Agente[];
   contribuintes: Contribuinte[];
+  categoriasContribuintes: CategoriaContribuinte[];
   tiposReceita: TipoReceita[];
   pagamentos: Pagamento[];
   auditoriaLogs: AuditoriaLog[];
@@ -41,6 +44,7 @@ interface AppStore {
   setSearchQuery: (query: string) => void;
   notifications: NotificationItem[];
   addNotification: (notification: Omit<NotificationItem, 'id' | 'time' | 'read'>) => void;
+  markNotificationRead: (id: string) => void;
   markAllNotificationsRead: () => void;
   clearNotifications: () => void;
 
@@ -61,9 +65,12 @@ interface AppStore {
   updateAgente: (id: string, updates: Partial<Agente>) => void;
   deleteAgente: (id: string) => void;
 
-  addContribuinte: (item: Omit<Contribuinte, 'id'>) => void;
-  updateContribuinte: (id: string, updates: Partial<Contribuinte>) => void;
-  deleteContribuinte: (id: string) => void;
+  addContribuinte: (item: Omit<Contribuinte, 'id' | 'dataRegistro' | 'agenteId'>) => Promise<Contribuinte>;
+  loadContributorsPage: (page: number, search?: string) => Promise<{ items: Contribuinte[]; total: number }>;
+  updateContribuinte: (id: string, updates: Partial<Contribuinte>) => Promise<Contribuinte>;
+
+  addCategoriaContribuinte: (item: Omit<CategoriaContribuinte, 'id'>) => void;
+  updateCategoriaContribuinte: (id: string, updates: Partial<CategoriaContribuinte>) => void;
 
   addTipoReceita: (item: Omit<TipoReceita, 'id'>) => void;
   updateTipoReceita: (id: string, updates: Partial<TipoReceita>) => void;
@@ -116,6 +123,7 @@ export const useAppStore = create<AppStore>((set, get) => {
       dbService.onSnapshot('mercados', (data) => set({ mercados: data })),
       dbService.onSnapshot('agentes', (data) => set({ agentes: data })),
       dbService.onSnapshot('contribuintes', (data) => set({ contribuintes: data })),
+      dbService.onSnapshot('categoria_contribuintes', (data) => set({ categoriasContribuintes: data })),
       dbService.onSnapshot('tipos_receita', (data) => set({ tiposReceita: data })),
       dbService.onSnapshot('pagamentos', (data) => set({ pagamentos: data })),
       dbService.onSnapshot('auditoria', (data) => set({ auditoriaLogs: data })),
@@ -127,6 +135,13 @@ export const useAppStore = create<AppStore>((set, get) => {
   // Defer listener initialization to ensure store state is fully instantiated beforehand
   setTimeout(() => {
     initListeners();
+    apiFetch('/api/auth/me')
+      .then(async (response) => {
+        if (!response.ok) return;
+        const data = await response.json();
+        if (data.user) get().setCurrentUser(data.user);
+      })
+      .catch(() => {});
   }, 0);
 
   // Handle live collection simulator events
@@ -156,8 +171,13 @@ export const useAppStore = create<AppStore>((set, get) => {
       dbService.setTenantContext(u?.municipioId || '', profile);
     },
     setCurrentUser: (user) => {
+      if (!user) {
+        void logoutSession();
+        set({ currentUser: null, activeProfile: 'Super Admin' });
+        return;
+      }
       set({ currentUser: user, activeProfile: user ? user.perfil : 'Super Admin' });
-      dbService.setTenantContext(user?.municipioId || '', user ? user.perfil : 'Super Admin');
+      dbService.setTenantContext(user.municipioId || '', user.perfil);
     },
 
     // Preload items initially to prevent empty tables before updates or snapshots
@@ -166,6 +186,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     mercados: dbService.SimulatorState.mercados || [],
     agentes: dbService.SimulatorState.agentes || [],
     contribuintes: dbService.SimulatorState.contribuintes || [],
+    categoriasContribuintes: dbService.SimulatorState.categoria_contribuintes || [],
     tiposReceita: dbService.SimulatorState.tipos_receita || [],
     pagamentos: dbService.SimulatorState.pagamentos || [],
     auditoriaLogs: dbService.SimulatorState.auditoria || [],
@@ -194,6 +215,9 @@ export const useAppStore = create<AppStore>((set, get) => {
         },
         ...state.notifications
       ]
+    })),
+    markNotificationRead: (id) => set((state) => ({
+      notifications: state.notifications.map(n => n.id === id ? { ...n, read: true } : n)
     })),
     markAllNotificationsRead: () => set((state) => ({
       notifications: state.notifications.map(n => ({ ...n, read: true }))
@@ -276,20 +300,13 @@ export const useAppStore = create<AppStore>((set, get) => {
     },
 
     // CRUD Contribuintes
-    addContribuinte: (item) => dbService.addDocument('contribuintes', item),
-    updateContribuinte: (id, updates) => dbService.updateDocument('contribuintes', id, updates),
-    deleteContribuinte: (id) => {
-      const { currentUser, activeProfile } = get();
-      const userEmail = currentUser?.email || 'admin@receita360.gw';
-      const deleted = dbService.deleteDocument('contribuintes', id, userEmail, activeProfile);
-      if (deleted) {
-        get().addNotification({
-          title: 'Contribuinte Excluído',
-          message: `O contribuinte "${deleted.nome}" foi excluído com sucesso por ${currentUser?.nome || 'Administrador'}.`,
-          type: 'warning'
-        });
-      }
-    },
+    addContribuinte: (item) => dbService.createContributor(item),
+    loadContributorsPage: (page, search) => dbService.loadContributorsPage(page, search),
+    updateContribuinte: (id, updates) => dbService.updateContributor(id, updates),
+
+    // Contributor categories
+    addCategoriaContribuinte: (item) => dbService.addDocument('categoria_contribuintes', item),
+    updateCategoriaContribuinte: (id, updates) => dbService.updateDocument('categoria_contribuintes', id, updates),
 
     // CRUD TiposReceita
     addTipoReceita: (item) => dbService.addDocument('tipos_receita', item),
@@ -361,4 +378,3 @@ export const useAppStore = create<AppStore>((set, get) => {
     }
   };
 });
-

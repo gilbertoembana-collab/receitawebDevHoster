@@ -1,32 +1,49 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../../store';
 import { Contribuinte } from '../../types';
 import CameraPhotoDialog from '../../components/CameraPhotoDialog';
 import QrScannerDialog from '../../components/QrScannerDialog';
 import { 
-  Plus, Edit2, Trash2, Search, Store, RefreshCw, 
-  FileSpreadsheet, Printer, Camera, QrCode, Sparkles, 
+  Plus, Edit2, Eye, Search, Store, RefreshCw,
+  FileSpreadsheet, Printer, Camera, QrCode,
   UserCheck, Maximize2, Image as ImageIcon, CheckCircle2 
 } from 'lucide-react';
 import { 
   Box, Typography, Button, TextField, Table, TableBody, TableCell, 
   TableContainer, TableHead, TableRow, Paper, Dialog, DialogTitle, 
   DialogContent, DialogActions, Chip, FormControl, Select, MenuItem, InputLabel,
-  TablePagination, InputAdornment, IconButton, Tooltip, Avatar
+  Pagination, InputAdornment, IconButton, Tooltip, Avatar
 } from '@mui/material';
 import { exportToExcel, printToPDF } from '../../utils/export';
 
+type ContributorFormStatus = 'ativo' | 'inativo-temporario' | 'inativo';
+
+function escapeCardHtml(value: unknown): string {
+  return String(value ?? '').replace(/[&<>"']/g, character => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  })[character] || character);
+}
+
+function getMunicipalityNameSuffix(name: string): string {
+  return name.trim().replace(/^(?:c[âa]mara\s+municipal\s*)+/i, '').trim();
+}
+
 export default function Contribuintes() {
   const { 
-    contribuintes, mercados, addContribuinte, updateContribuinte, 
-    deleteContribuinte, activeProfile, addNotification, currentUser 
+    mercados, municipios, agentes, configuracoes, addContribuinte, updateContribuinte,
+    loadContributorsPage, categoriasContribuintes, activeProfile, addNotification, currentUser
   } = useAppStore();
 
   const [searchTerm, setSearchTerm] = useState('');
   const [openDialog, setOpenDialog] = useState(false);
+  const [viewingItem, setViewingItem] = useState<Contribuinte | null>(null);
   const [editingItem, setEditingItem] = useState<Contribuinte | null>(null);
-  const [deleteId, setDeleteId] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
 
   // Dialogs for Camera Capture & QR Code Scanning
   const [openPhotoDialog, setOpenPhotoDialog] = useState(false);
@@ -34,7 +51,11 @@ export default function Contribuintes() {
 
   // Pagination states
   const [page, setPage] = useState(0);
-  const [rowsPerPage, setRowsPerPage] = useState(5);
+  const [totalContributors, setTotalContributors] = useState(0);
+  const [pageRows, setPageRows] = useState<Contribuinte[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const requestId = useRef(0);
+  const rowsPerPage = 100;
 
   const isAdmin = ['Administrador Municipal', 'Administrator'].includes(activeProfile);
   const userMuniId = currentUser?.municipioId || '';
@@ -45,19 +66,57 @@ export default function Contribuintes() {
     }
     return mercados;
   }, [mercados, isAdmin, userMuniId]);
+  const loadPage = useCallback(async (targetPage: number, search: string) => {
+    const currentRequest = ++requestId.current;
+    setIsLoading(true);
+    try {
+      const result = await loadContributorsPage(targetPage, search);
+      if (currentRequest === requestId.current) {
+        const lastPage = Math.max(0, Math.ceil(result.total / rowsPerPage) - 1);
+        if (targetPage > lastPage) {
+          setTotalContributors(result.total);
+          setPage(lastPage);
+          return false;
+        }
+        setPageRows(result.items);
+        setTotalContributors(result.total);
+        return true;
+      }
+      return false;
+    } catch (error) {
+      if (currentRequest === requestId.current) {
+        addNotification({
+          title: 'Falha na sincronização',
+          message: error instanceof Error ? error.message : 'Verifique a ligação e tente novamente.',
+          type: 'warning',
+        });
+      }
+      return false;
+    } finally {
+      if (currentRequest === requestId.current) setIsLoading(false);
+    }
+  }, [loadContributorsPage, addNotification, rowsPerPage]);
 
-  const handleRefresh = () => {
+  useEffect(() => {
+    const timeout = window.setTimeout(() => loadPage(page, searchTerm), searchTerm ? 300 : 0);
+    return () => window.clearTimeout(timeout);
+  }, [loadPage, page, searchTerm]);
+
+  const handleRefresh = async () => {
     setIsRefreshing(true);
     setSearchTerm('');
     setPage(0);
-    setTimeout(() => {
+    try {
+      if (await loadPage(0, '')) {
+        addNotification({
+          title: 'Sincronização',
+          message: 'Lista de contribuintes e feirantes cadastrados actualizada.',
+          type: 'success'
+        });
+      }
+    } finally {
       setIsRefreshing(false);
-      addNotification({
-        title: 'Sincronização',
-        message: 'Lista de contribuintes e feirantes cadastrados actualizada.',
-        type: 'success'
-      });
-    }, 600);
+    }
   };
 
   // Form Fields
@@ -67,50 +126,144 @@ export default function Contribuintes() {
   const [mercadoId, setMercadoId] = useState('');
   const [numBanca, setNumBanca] = useState('');
   const [categoria, setCategoria] = useState('');
-  const [atividade, setAtividade] = useState('');
+  const [dimensao, setDimensao] = useState('');
   const [observacoes, setObservacoes] = useState('');
-  const [status, setStatus] = useState<'ativo' | 'inativo'>('ativo');
+  const [status, setStatus] = useState<ContributorFormStatus>('ativo');
+  const [reativarEm, setReativarEm] = useState('');
   const [qrCode, setQrCode] = useState('');
-  const [areaM2, setAreaM2] = useState<string | number>('');
+  const [areaM2, setAreaM2] = useState<string | number>(0);
   const [foto, setFoto] = useState('');
   const [fotoSizeKB, setFotoSizeKB] = useState<number>(0);
+  const visibleCategories = categoriasContribuintes.filter(
+    item => item.status === 'ativo' || item.id === categoria || item.nome === categoria,
+  );
+  const getCategoryName = (categoryId: string) => (
+    categoriasContribuintes.find(item => item.id === categoryId || item.nome === categoryId)?.nome || categoryId
+  );
+  const getAgentName = (agentId: string) => (
+    agentes.find(agent => agent.id === agentId)?.nome || (agentId ? agentId : 'A sincronizar')
+  );
 
-  const filtered = contribuintes.filter(c => {
-    if (isAdmin) {
-      const merc = mercados.find(m => m.id === c.mercadoId);
-      if (!merc || merc.municipioId !== userMuniId) {
-        return false;
-      }
-    }
-    return (
-      c.nome.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      c.documento.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      c.numBanca.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      c.categoria.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      (c.qrCode && c.qrCode.toLowerCase().includes(searchTerm.toLowerCase()))
-    );
-  });
-
-  const currentPage = Math.max(0, Math.min(page, Math.ceil(filtered.length / rowsPerPage) - 1));
-  const paginated = filtered.slice(currentPage * rowsPerPage, currentPage * rowsPerPage + rowsPerPage);
+  const filtered = pageRows;
+  const totalPages = Math.max(1, Math.ceil(totalContributors / rowsPerPage));
+  const currentPage = Math.min(page, totalPages - 1);
 
   const handleOpenAdd = () => {
     setEditingItem(null);
     setNome('');
     setTelefone('');
-    const newDoc = `NIF-${Math.floor(Math.random() * 900000) + 100000}`;
-    setDocumento(newDoc);
+    setDocumento('');
     setMercadoId(allowedMercados[0]?.id || '');
-    setNumBanca('B-01');
-    setCategoria('Alimentos');
-    setAtividade('');
+    setNumBanca('');
+    setCategoria('');
+    setDimensao('');
     setObservacoes('');
     setStatus('ativo');
-    setQrCode(`QR-${newDoc.replace(/[^a-zA-Z0-9]/g, '')}`);
-    setAreaM2(4.5);
+    setReativarEm('');
+    setQrCode('');
+    setAreaM2(0);
     setFoto('');
     setFotoSizeKB(0);
     setOpenDialog(true);
+  };
+
+  const handleOpenView = (item: Contribuinte) => setViewingItem(item);
+
+  const handlePrintFicha = (item: Contribuinte) => {
+    const market = mercados.find(entry => entry.id === item.mercadoId);
+    const marketName = market?.nome || 'Não alocado';
+    const municipalityName = municipios.find(municipio => municipio.id === market?.municipioId)?.nome
+      || configuracoes.nomeMunicipio
+      || 'CÂMARA MUNICIPAL';
+    const municipalityNameSuffix = getMunicipalityNameSuffix(municipalityName);
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) {
+      addNotification({
+        title: 'Impressão bloqueada',
+        message: 'Permita pop-ups no navegador para imprimir o cartão.',
+        type: 'warning',
+      });
+      return;
+    }
+
+    const statusLabel = item.status === 'ativo' ? 'ATIVO' : item.reativarEm ? 'TEMPORARIAMENTE DESATIVADO' : 'DESATIVADO';
+    const safePhoto = item.foto && /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/i.test(item.foto)
+      ? item.foto
+      : '';
+    const safeMunicipalLogo = configuracoes.logoCamara && /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/i.test(configuracoes.logoCamara)
+      ? configuracoes.logoCamara
+      : '';
+    printWindow.document.write(`
+      <!DOCTYPE html>
+      <html lang="pt">
+        <head>
+          <meta charset="utf-8">
+          <title>Cartão de Comerciante - ${escapeCardHtml(item.nome)}</title>
+          <style>
+            @page { size: 54mm 85.6mm; margin: 0; }
+            * { box-sizing: border-box; }
+            html, body { width: 54mm; height: 85.6mm; margin: 0; padding: 0; }
+            body { font-family: Arial, sans-serif; color: #111; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+            .card { width: 54mm; height: 85.6mm; overflow: hidden; background: #fff; position: relative; display: flex; flex-direction: column; }
+            .header { flex: 0 0 20mm; padding: 1mm 1.5mm; display: grid; grid-template-columns: 8mm 1fr 8mm; align-items: center; gap: .7mm; text-align: center; }
+            .municipal-logo, .system-logo { width: 8.5mm; height: 8.5mm; object-fit: contain; border-radius: 50%; }
+            .system-logo { background: #70c4ed; display: grid; place-items: center; color: #0b4ea2; font-weight: 900; font-size: 12pt; letter-spacing: -1pt; border: .4mm solid #d7effb; }
+            .heading { font-size: 5.1pt; font-weight: 900; line-height: 1.2; }
+            .ministry { display: inline-block; white-space: nowrap; font-size: 3.4pt; letter-spacing: -.08pt; }
+            .market { flex: 0 0 7mm; padding: 1mm; color: #066338; text-align: center; text-transform: uppercase; font-size: 8pt; font-weight: 900; letter-spacing: .25pt; overflow: hidden; white-space: nowrap; }
+            .card-title { flex: 0 0 6.5mm; margin: 0 3.5mm; border-radius: 2mm; background: #08713b; color: white; text-align: center; padding: 1mm; font-size: 8pt; font-weight: 900; letter-spacing: .5pt; }
+            .content { position: relative; flex: 1; min-height: 0; padding: 4mm 2mm 2mm; display: grid; grid-template-columns: 22mm 1fr; gap: 2.5mm; }
+            .watermark { position: absolute; width: 47mm; height: 47mm; object-fit: contain; opacity: .12; top: 50%; left: 50%; transform: translate(-50%, -50%); }
+            .photo-column, .details { position: relative; z-index: 1; min-width: 0; }
+            .photo { width: 22mm; height: 39mm; border: .45mm solid #50695c; border-radius: 2mm; object-fit: cover; background: #f4f4f4; }
+            .placeholder { width: 22mm; height: 39mm; border: .45mm solid #50695c; border-radius: 2mm; background: #e5efe9; color: #08713b; font-size: 24pt; font-weight: bold; display: grid; place-items: center; }
+            .tag { margin-top: 1mm; text-align: center; font-size: 7pt; font-weight: 900; white-space: nowrap; overflow: hidden; }
+            .field { padding: 1mm 0 1.2mm; border-bottom: .2mm solid #aaa; }
+            .label { display: block; color: #08713b; text-transform: uppercase; letter-spacing: .1pt; font-size: 5.7pt; font-weight: 900; }
+            .value { display: block; color: #111; font-size: 7.2pt; font-weight: 700; margin-top: .4mm; line-height: 1.05; overflow: hidden; overflow-wrap: anywhere; max-height: 5mm; }
+            .footer { flex: 0 0 13mm; padding: 1mm; position: relative; background: linear-gradient(17deg, #df101b 0 31%, #f2d419 32% 38%, #07833a 39% 100%); display: flex; justify-content: flex-end; align-items: center; }
+            .star { position: absolute; left: 5mm; bottom: 2mm; color: #111; font-size: 17pt; line-height: 1; }
+            .status { min-width: 22mm; padding: 1.2mm 2mm; border: .4mm solid #b4d4bd; border-radius: 6mm; background: #08713b; color: white; text-align: center; font-size: 8pt; font-weight: 900; letter-spacing: .4pt; }
+            .check { display: inline-grid; place-items: center; width: 5mm; height: 5mm; margin-left: 1mm; border-radius: 50%; background: white; color: #08713b; font-size: 9pt; vertical-align: middle; }
+          </style>
+        </head>
+        <body>
+          <article class="card">
+            <header class="header">
+              ${safeMunicipalLogo ? `<img class="municipal-logo" src="${safeMunicipalLogo}" alt="Brasão municipal">` : '<div></div>'}
+              <div class="heading">
+                REPÚBLICA DA GUINÉ-BISSAU<br>
+                <span class="ministry">MINISTÉRIO DA ADMINISTRAÇÃO TERRITORIAL E PODER LOCAL</span><br>
+                CÂMARA MUNICIPAL${municipalityNameSuffix ? `<br>${escapeCardHtml(municipalityNameSuffix.toUpperCase())}` : ''}
+              </div>
+              <div class="system-logo" aria-label="Sistema Receita 360">R3</div>
+            </header>
+            <div class="market">${escapeCardHtml(marketName)}</div>
+            <div class="card-title">CARTÃO DE UTENTE</div>
+            <section class="content">
+              ${safeMunicipalLogo ? `<img class="watermark" src="${safeMunicipalLogo}" alt="">` : ''}
+              <div class="photo-column">
+                ${safePhoto
+                  ? `<img class="photo" src="${safePhoto}" alt="Foto do comerciante">`
+                  : `<div class="placeholder">${escapeCardHtml(item.nome.trim().charAt(0).toUpperCase() || '?')}</div>`}
+                ${item.qrCode ? `<div class="tag">${escapeCardHtml(item.qrCode)}</div>` : ''}
+              </div>
+              <div class="details">
+                <div class="field"><span class="label">Nome</span><span class="value">${escapeCardHtml(item.nome)}</span></div>
+                <div class="field"><span class="label">NIF</span><span class="value">${escapeCardHtml(item.documento)}</span></div>
+                <div class="field"><span class="label">Número de banca</span><span class="value">${escapeCardHtml(item.numBanca || '-')}</span></div>
+                <div class="field"><span class="label">Mercado</span><span class="value">${escapeCardHtml(marketName)}</span></div>
+                <div class="field"><span class="label">Atividade</span><span class="value">${escapeCardHtml(item.atividade || getCategoryName(item.categoria) || '-')}</span></div>
+                <div class="field"><span class="label">Data de validade</span><span class="value">Não definida</span></div>
+              </div>
+            </section>
+            <footer class="footer"><span class="star">★</span><span class="status">${item.status === 'ativo' ? 'ATIVO <span class="check">✓</span>' : escapeCardHtml(statusLabel)}</span></footer>
+          </article>
+          <script>window.onload = function() { window.print(); setTimeout(function() { window.close(); }, 500); };</script>
+        </body>
+      </html>
+    `);
+    printWindow.document.close();
   };
 
   const handleOpenEdit = (item: Contribuinte) => {
@@ -121,74 +274,127 @@ export default function Contribuintes() {
     setMercadoId(item.mercadoId);
     setNumBanca(item.numBanca);
     setCategoria(item.categoria);
-    setAtividade(item.atividade);
+    setDimensao(item.dimensao || '');
     setObservacoes(item.observacoes);
-    setStatus(item.status);
-    setQrCode(item.qrCode || `QR-${item.documento.replace(/[^a-zA-Z0-9]/g, '')}`);
-    setAreaM2(item.areaM2 !== undefined ? item.areaM2 : '');
+    setStatus(item.status === 'ativo' ? 'ativo' : item.reativarEm ? 'inativo-temporario' : 'inativo');
+    setReativarEm(item.reativarEm || '');
+    setQrCode(item.qrCode || '');
+    setAreaM2(item.areaM2 ?? 0);
     setFoto(item.foto || '');
     setFotoSizeKB(item.foto ? Math.round((item.foto.length * 0.75 / 1024) * 10) / 10 : 0);
     setOpenDialog(true);
   };
 
-  const handleSave = () => {
-    if (!nome.trim() || !documento.trim() || !mercadoId || !numBanca.trim()) {
+  const handleSave = async () => {
+    const statusOnlyEdit = Boolean(editingItem && !canEdit);
+    if (!statusOnlyEdit && (!nome.trim() || !documento.trim() || !mercadoId || !numBanca.trim() || !categoria || !dimensao)) {
       addNotification({
         title: 'Erro de Validação',
-        message: 'Por favor, preencha os campos obrigatórios (Nome, Documento, Mercado e Banca).',
+        message: 'Preencha Nome, NIF, Mercado, Número da Banca, Categoria e Dimensão.',
         type: 'warning'
       });
       return;
     }
 
-    const payload: any = { 
-      nome: nome.trim(), 
-      telefone: telefone.trim(), 
-      documento: documento.trim().toUpperCase(), 
-      mercadoId, 
-      numBanca: numBanca.trim().toUpperCase(), 
-      categoria: categoria.trim(), 
-      atividade: atividade.trim(), 
-      observacoes: observacoes.trim(), 
-      status,
-      qrCode: qrCode.trim() || undefined,
-      areaM2: areaM2 !== '' && !isNaN(Number(areaM2)) ? Number(areaM2) : undefined,
-      foto: foto || undefined
+    const parsedArea = areaM2 === '' ? 0 : Number(areaM2);
+    if (!statusOnlyEdit && (!Number.isFinite(parsedArea) || parsedArea < 0)) {
+      addNotification({
+        title: 'Erro de Validação',
+        message: 'A área deve ser um número igual ou superior a zero.',
+        type: 'warning'
+      });
+      return;
+    }
+
+    if (status === 'inativo-temporario' && !reativarEm) {
+      addNotification({
+        title: 'Erro de Validação',
+        message: 'Escolha a data de reativação para a desativação temporária.',
+        type: 'warning'
+      });
+      return;
+    }
+
+    const dbStatus: Contribuinte['status'] = status === 'ativo' ? 'ativo' : 'inativo';
+    const statusPayload: Pick<Contribuinte, 'status' | 'reativarEm'> = {
+      status: dbStatus,
+      reativarEm: status === 'inativo-temporario' ? reativarEm : null,
     };
 
     if (editingItem) {
-      updateContribuinte(editingItem.id, payload);
-      addNotification({
-        title: 'Contribuinte Atualizado',
-        message: `O contribuinte "${nome.trim()}" foi atualizado com sucesso no banco de dados.`,
-        type: 'success'
-      });
+      setIsSaving(true);
+      try {
+        const payload = statusOnlyEdit ? statusPayload : {
+          nome: nome.trim(),
+          telefone: telefone.trim(),
+          documento: documento.trim().toUpperCase(),
+          mercadoId,
+          numBanca: numBanca.trim().toUpperCase(),
+          categoria,
+          atividade: editingItem.atividade || '',
+          dimensao: dimensao as Contribuinte['dimensao'],
+          observacoes: observacoes.trim(),
+          ...statusPayload,
+          qrCode: qrCode.trim() || null,
+          areaM2: parsedArea,
+          foto: foto || undefined,
+        };
+        const updated = await updateContribuinte(editingItem.id, payload);
+        setPageRows(rows => rows.map(row => row.id === editingItem.id ? { ...row, ...updated } : row));
+        addNotification({
+          title: 'Contribuinte Atualizado',
+          message: statusOnlyEdit
+            ? `O estado de "${updated.nome}" foi atualizado.`
+            : `O contribuinte "${nome.trim()}" foi atualizado com sucesso no banco de dados.`,
+          type: 'success'
+        });
+      } catch (error) {
+        addNotification({
+          title: 'Falha ao atualizar contribuinte',
+          message: error instanceof Error ? error.message : 'Verifique a ligação e tente novamente.',
+          type: 'warning',
+        });
+        return;
+      } finally {
+        setIsSaving(false);
+      }
     } else {
-      addContribuinte(payload);
-      addNotification({
-        title: 'Contribuinte Cadastrado',
-        message: `O contribuinte "${nome.trim()}" foi cadastrado com sucesso no banco de dados.`,
-        type: 'success'
-      });
+      setIsSaving(true);
+      try {
+        const created = await addContribuinte({
+          nome: nome.trim(),
+          telefone: telefone.trim(),
+          documento: documento.trim().toUpperCase(),
+          mercadoId,
+          numBanca: numBanca.trim().toUpperCase(),
+          categoria,
+          atividade: '',
+          dimensao: dimensao as Contribuinte['dimensao'],
+          observacoes: observacoes.trim(),
+          status: 'ativo',
+          reativarEm: null,
+          qrCode: qrCode.trim() || null,
+          areaM2: parsedArea,
+          foto: foto || undefined,
+        });
+        await loadPage(page, searchTerm);
+        addNotification({
+          title: 'Contribuinte Cadastrado',
+          message: `O contribuinte "${created.nome}" foi cadastrado com sucesso no banco de dados.`,
+          type: 'success'
+        });
+      } catch (error) {
+        addNotification({
+          title: 'Falha ao cadastrar contribuinte',
+          message: error instanceof Error ? error.message : 'Verifique a ligação e tente novamente.',
+          type: 'warning',
+        });
+        return;
+      } finally {
+        setIsSaving(false);
+      }
     }
     setOpenDialog(false);
-  };
-
-  const handleDelete = (id: string) => {
-    setDeleteId(id);
-  };
-
-  const handleConfirmDelete = () => {
-    if (deleteId) {
-      const contrNome = contribuintes.find(c => c.id === deleteId)?.nome || '';
-      deleteContribuinte(deleteId);
-      addNotification({
-        title: 'Contribuinte Removido',
-        message: `O contribuinte "${contrNome}" foi excluído com sucesso.`,
-        type: 'warning'
-      });
-      setDeleteId(null);
-    }
   };
 
   const canEdit = [
@@ -199,9 +405,11 @@ export default function Contribuintes() {
     'Administrator', 
     'Departamento de Mercados'
   ].includes(activeProfile);
+  const canManageStatus = canEdit || ['AGENTE', 'Agente de Cobrança', 'Collection Agent'].includes(activeProfile);
+  const isStatusOnlyEditor = Boolean(editingItem && !canEdit);
 
   const handleExportExcel = () => {
-    const headers = ['Nome', 'Documento / NIF', 'QR Code', 'Mercado', 'Banca / Loja', 'Área (m²)', 'Categoria', 'Status'];
+    const headers = ['Nome', 'Documento / NIF', 'QR Code', 'Mercado', 'Banca / Loja', 'Área (m²)', 'Categoria de Contribuinte', 'Dimensão', 'Status', 'Data de Registro', 'Agente Responsável'];
     const data = filtered.map(c => {
       const merc = mercados.find(m => m.id === c.mercadoId)?.nome || 'Não definido';
       return [
@@ -211,15 +419,18 @@ export default function Contribuintes() {
         merc,
         c.numBanca,
         c.areaM2 ? `${c.areaM2} m²` : '-',
-        c.categoria,
-        c.status === 'ativo' ? 'Ativo' : 'Inativo'
+        getCategoryName(c.categoria),
+        c.dimensao,
+        c.status === 'ativo' ? 'Ativo' : c.reativarEm ? 'Desativado temporariamente' : 'Desativado',
+        c.dataRegistro ? new Date(c.dataRegistro).toLocaleString('pt') : '-',
+        getAgentName(c.agenteId),
       ];
     });
     exportToExcel(data, headers, 'contribuintes');
   };
 
   const handlePrintPDF = () => {
-    const headers = ['Nome', 'Documento / NIF', 'QR Code', 'Mercado', 'Banca / Loja', 'Área (m²)', 'Categoria', 'Status'];
+    const headers = ['Nome', 'Documento / NIF', 'QR Code', 'Mercado', 'Banca / Loja', 'Área (m²)', 'Categoria de Contribuinte', 'Dimensão', 'Status', 'Data de Registro', 'Agente Responsável'];
     const data = filtered.map(c => {
       const merc = mercados.find(m => m.id === c.mercadoId)?.nome || 'Não definido';
       return [
@@ -229,8 +440,11 @@ export default function Contribuintes() {
         merc,
         c.numBanca,
         c.areaM2 ? `${c.areaM2} m²` : '-',
-        c.categoria,
-        c.status === 'ativo' ? 'Ativo' : 'Inativo'
+        getCategoryName(c.categoria),
+        c.dimensao,
+        c.status === 'ativo' ? 'Ativo' : c.reativarEm ? 'Desativado temporariamente' : 'Desativado',
+        c.dataRegistro ? new Date(c.dataRegistro).toLocaleString('pt') : '-',
+        getAgentName(c.agenteId),
       ];
     });
     printToPDF('Contribuintes (Feirantes)', headers, data);
@@ -242,7 +456,7 @@ export default function Contribuintes() {
         <div>
           <Typography variant="h1">Gestão de Contribuintes (Feirantes)</Typography>
           <Typography variant="body1" sx={{ color: 'text.secondary' }}>
-            Cadastro completo de feirantes com fotos compactadas (&le;70 KB), QR Codes para leitura no POS e dimensões da banca (m²)
+            Cadastro de contribuintes com validação obrigatória de NIF, categoria e dimensão comercial.
           </Typography>
         </div>
         {canEdit && (
@@ -264,7 +478,10 @@ export default function Contribuintes() {
           <input
             type="text"
             value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
+            onChange={(e) => {
+              setSearchTerm(e.target.value);
+              setPage(0);
+            }}
             placeholder="Pesquisar feirante por nome, NIF, QR Code ou banca..."
             className="w-full pl-9 pr-4 py-2 text-xs border dark:border-slate-700 dark:bg-slate-900 dark:text-white rounded-lg outline-none focus:border-blue-500"
             id="contribuintes-search"
@@ -304,29 +521,32 @@ export default function Contribuintes() {
       </div>
 
       <TableContainer component={Paper}>
-        <Table className={isRefreshing ? 'opacity-50 transition-opacity duration-300' : 'transition-opacity duration-300'}>
+        <Table className={isRefreshing || isLoading ? 'opacity-50 transition-opacity duration-300' : 'transition-opacity duration-300'}>
           <TableHead>
             <TableRow>
               <TableCell>Foto / Contribuinte</TableCell>
-              <TableCell>Documento (NIF)</TableCell>
+              <TableCell>Número de Identificação Fiscal</TableCell>
               <TableCell>QR Code (POS)</TableCell>
               <TableCell>Mercado Alocado</TableCell>
               <TableCell>Banca Nº</TableCell>
               <TableCell>Área (m²)</TableCell>
-              <TableCell>Categoria</TableCell>
+              <TableCell>Categoria de Contribuinte</TableCell>
+              <TableCell>Dimensão</TableCell>
               <TableCell>Status</TableCell>
-              {canEdit && <TableCell align="right">Ações</TableCell>}
+              <TableCell>Data e Hora de Registro</TableCell>
+              <TableCell>Agente Responsável</TableCell>
+              <TableCell align="right">Ações</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
-            {paginated.length === 0 ? (
+            {filtered.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={canEdit ? 9 : 8} align="center" className="text-slate-400 py-6">
-                  Nenhum contribuinte cadastrado ou correspondente à busca.
+                <TableCell colSpan={12} align="center" className="text-slate-400 py-6">
+                  {isLoading ? 'A carregar contribuintes...' : 'Nenhum contribuinte cadastrado ou correspondente à busca.'}
                 </TableCell>
               </TableRow>
             ) : (
-              paginated.map((c) => {
+              filtered.map((c) => {
                 const merc = mercados.find(m => m.id === c.mercadoId);
                 return (
                   <TableRow key={c.id} hover>
@@ -378,10 +598,10 @@ export default function Contribuintes() {
                       </span>
                     </TableCell>
 
-                    <TableCell className="font-mono font-bold text-slate-700 dark:text-slate-300">{c.numBanca}</TableCell>
+                    <TableCell className="font-mono font-bold text-slate-700 dark:text-slate-300">{c.numBanca || '-'}</TableCell>
                     
                     <TableCell>
-                      {c.areaM2 ? (
+                      {c.areaM2 !== undefined && c.areaM2 !== null ? (
                         <span className="font-mono text-xs font-bold bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded border dark:border-slate-700">
                           {c.areaM2} m²
                         </span>
@@ -391,71 +611,107 @@ export default function Contribuintes() {
                     </TableCell>
 
                     <TableCell>
-                      <Chip size="small" label={c.categoria} sx={{ fontSize: '10px', height: 18, bg: 'slate-100' }} />
+                      <Chip size="small" label={getCategoryName(c.categoria)} sx={{ fontSize: '10px', height: 18, bg: 'slate-100' }} />
                     </TableCell>
 
                     <TableCell>
-                      <Chip 
-                        size="small" 
-                        label={c.status === 'ativo' ? 'Ativo' : 'Inativo'} 
-                        color={c.status === 'ativo' ? 'success' : 'default'} 
-                        sx={{ fontSize: 10, height: 20 }}
-                      />
+                      <Chip size="small" label={c.dimensao || 'Por classificar'} sx={{ fontSize: '10px', height: 18 }} />
                     </TableCell>
 
-                    {canEdit && (
-                      <TableCell align="right">
-                        <Box sx={{ display: 'flex', gap: 1, justifyContent: 'flex-end' }}>
-                          <Button 
-                            size="small" 
-                            variant="outlined" 
-                            startIcon={<Edit2 size={13} />}
-                            onClick={() => handleOpenEdit(c)}
-                            sx={{ py: 0.5, fontSize: '11px', minWidth: 'auto' }}
-                            id={`edit-cont-${c.id}`}
-                          >
-                            Editar
-                          </Button>
-                          <Button 
-                            size="small" 
-                            variant="outlined" 
-                            color="error" 
-                            startIcon={<Trash2 size={13} />}
-                            onClick={() => handleDelete(c.id)}
-                            sx={{ py: 0.5, fontSize: '11px', minWidth: 'auto' }}
-                            id={`delete-cont-${c.id}`}
-                          >
-                            Excluir
-                          </Button>
-                        </Box>
-                      </TableCell>
-                    )}
+                    <TableCell>
+                      <Tooltip
+                        title={c.status === 'inativo' && c.reativarEm
+                          ? `Reativação automática em ${c.reativarEm}`
+                          : c.status === 'inativo' ? 'Sem data de reativação automática' : ''}
+                        arrow
+                      >
+                        <Chip
+                          size="small"
+                          label={c.status === 'ativo' ? 'Ativo' : c.reativarEm ? 'Desativado temporariamente' : 'Desativado'}
+                          color={c.status === 'ativo' ? 'success' : c.reativarEm ? 'warning' : 'default'}
+                          sx={{ fontSize: 10, height: 20 }}
+                        />
+                      </Tooltip>
+                    </TableCell>
+
+                    <TableCell className="text-xs">
+                      {c.dataRegistro ? new Date(c.dataRegistro).toLocaleString('pt') : '-'}
+                    </TableCell>
+
+                    <TableCell className="text-xs">{c.agenteNome || getAgentName(c.agenteId)}</TableCell>
+
+                    <TableCell align="right">
+                      <Box sx={{ display: 'flex', gap: 1, justifyContent: 'flex-end', alignItems: 'center', flexWrap: 'nowrap' }}>
+                        <Button
+                          size="small"
+                          variant="outlined"
+                          startIcon={<Eye size={13} />}
+                          onClick={() => handleOpenView(c)}
+                          sx={{ py: 0.5, fontSize: '11px', minWidth: 'auto' }}
+                          id={`view-cont-${c.id}`}
+                        >
+                          Ver
+                        </Button>
+                        {canManageStatus && (
+                            <Button
+                              size="small"
+                              variant="outlined"
+                              startIcon={<Edit2 size={13} />}
+                              onClick={() => handleOpenEdit(c)}
+                              sx={{ py: 0.5, fontSize: '11px', minWidth: 'auto' }}
+                              id={`edit-cont-${c.id}`}
+                            >
+                              Editar
+                            </Button>
+                        )}
+                      </Box>
+                    </TableCell>
                   </TableRow>
                 );
               })
             )}
           </TableBody>
         </Table>
-        <TablePagination
-          rowsPerPageOptions={[5, 10, 25]}
-          component="div"
-          count={filtered.length}
-          rowsPerPage={rowsPerPage}
-          page={currentPage}
-          onPageChange={(_, newPage) => setPage(newPage)}
-          onRowsPerPageChange={(e) => {
-            setRowsPerPage(parseInt(e.target.value, 10));
-            setPage(0);
+        <Box
+          sx={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 2,
+            flexWrap: 'wrap',
+            px: 2,
+            py: 1,
           }}
-          labelRowsPerPage="Itens por página:"
-          labelDisplayedRows={({ from, to, count }) => `${from}-${to} de ${count !== -1 ? count : `mais de ${to}`}`}
-        />
+        >
+          <Typography variant="body2" color="text.secondary">
+            {totalContributors === 0
+              ? '0 registos'
+              : `${page * rowsPerPage + 1}–${Math.min((page + 1) * rowsPerPage, totalContributors)} de ${totalContributors} registos`}
+            {' · '}Página {totalContributors === 0 ? 0 : currentPage + 1} de {totalPages}
+            {' · '}100 por página
+          </Typography>
+          {totalContributors > 0 && (
+            <Pagination
+              count={totalPages}
+              page={currentPage + 1}
+              onChange={(_, selectedPage) => setPage(selectedPage - 1)}
+              showFirstButton
+              showLastButton
+              siblingCount={1}
+              boundaryCount={1}
+              disabled={isLoading}
+              color="primary"
+              size="small"
+              aria-label="Paginação dos contribuintes"
+            />
+          )}
+        </Box>
       </TableContainer>
 
       {/* Creation/Edition Dialog Modal */}
       <Dialog open={openDialog} onClose={() => setOpenDialog(false)} maxWidth="sm" fullWidth>
         <DialogTitle sx={{ fontWeight: 700, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <span>{editingItem ? 'Editar Ficha do Contribuinte' : 'Cadastrar Novo Contribuinte'}</span>
+          <span>{isStatusOnlyEditor ? 'Alterar Estado do Contribuinte' : editingItem ? 'Editar Ficha do Contribuinte' : 'Cadastrar Novo Contribuinte'}</span>
           {editingItem && (
             <Chip 
               label={editingItem.documento} 
@@ -468,6 +724,11 @@ export default function Contribuintes() {
         </DialogTitle>
         
         <DialogContent dividers>
+          <Box
+            component="fieldset"
+            disabled={isStatusOnlyEditor}
+            sx={{ border: 0, p: 0, m: 0, minWidth: 0 }}
+          >
           {/* SEÇÃO 1: FOTO DO CONTRIBUINTE (CAMERA & COMPRESSAO MAX 70 KB) */}
           <Box sx={{ 
             p: 2, 
@@ -564,7 +825,7 @@ export default function Contribuintes() {
             
             <TextField
               required
-              label="Documento de Identificação (NIF)"
+              label="Número de Identificação Fiscal (NIF)"
               fullWidth
               value={documento}
               onChange={(e) => setDocumento(e.target.value)}
@@ -589,7 +850,7 @@ export default function Contribuintes() {
               onChange={(e) => setQrCode(e.target.value.toUpperCase())}
               size="small"
               id="cont-field-qrcode"
-              helperText="Identificador para leitura rápida no aplicativo do fiscal"
+              helperText="Opcional. Leia ou informe um código existente; nenhum código é gerado automaticamente."
               slotProps={{
                 input: {
                   startAdornment: (
@@ -599,7 +860,7 @@ export default function Contribuintes() {
                   ),
                   endAdornment: (
                     <InputAdornment position="end">
-                      <Tooltip title="Scanear com a câmera ou gerar QR Code" arrow>
+                      <Tooltip title="Ler ou informar um código QR existente" arrow>
                         <IconButton 
                           size="small" 
                           edge="end" 
@@ -666,30 +927,34 @@ export default function Contribuintes() {
             />
 
             <FormControl fullWidth size="small" required className="col-span-2">
-              <InputLabel id="cont-cat-label">Categoria de Produto</InputLabel>
+              <InputLabel id="cont-cat-label">Categoria de Contribuinte</InputLabel>
               <Select
                 labelId="cont-cat-label"
                 value={categoria}
-                label="Categoria de Produto"
+                label="Categoria de Contribuinte"
                 onChange={(e) => setCategoria(e.target.value)}
                 id="cont-field-cat"
               >
-                {['Alimentos', 'Confecções', 'Eletrônicos', 'Carnes/Peixes', 'Cereais', 'Variedades', 'Artesanato', 'Outros'].map(cat => (
-                  <MenuItem key={cat} value={cat}>{cat}</MenuItem>
+                {visibleCategories.map(item => (
+                  <MenuItem key={item.id} value={item.nome}>{item.nome}</MenuItem>
                 ))}
               </Select>
             </FormControl>
 
-            <TextField
-              label="Atividade Comercial Detalhada"
-              placeholder="Ex: Venda de mandioca, batata-doce e legumes frescos"
-              fullWidth
-              value={atividade}
-              onChange={(e) => setAtividade(e.target.value)}
-              size="small"
-              className="col-span-2"
-              id="cont-field-atividade"
-            />
+            <FormControl fullWidth size="small" required className="col-span-2">
+              <InputLabel id="cont-dimensao-label">Dimensão Comercial</InputLabel>
+              <Select
+                labelId="cont-dimensao-label"
+                value={dimensao}
+                label="Dimensão Comercial"
+                onChange={(e) => setDimensao(e.target.value)}
+                id="cont-field-dimensao"
+              >
+                {['Micro', 'Pequeno', 'Médio', 'Grande'].map(size => (
+                  <MenuItem key={size} value={size}>{size}</MenuItem>
+                ))}
+              </Select>
+            </FormControl>
 
             <TextField
               label="Observações Adicionais"
@@ -702,27 +967,293 @@ export default function Contribuintes() {
               className="col-span-2"
               id="cont-field-obs"
             />
-
+          </div>
+          </Box>
+          {editingItem && (
+          <div className="grid grid-cols-2 gap-4">
             <FormControl fullWidth size="small" className="col-span-2">
               <InputLabel id="status-cont-label">Status</InputLabel>
               <Select
                 labelId="status-cont-label"
                 value={status}
                 label="Status"
-                onChange={(e) => setStatus(e.target.value as any)}
+                onChange={(e) => {
+                  const nextStatus = e.target.value as ContributorFormStatus;
+                  setStatus(nextStatus);
+                  if (nextStatus !== 'inativo-temporario') setReativarEm('');
+                }}
                 id="cont-field-status"
               >
-                <MenuItem value="ativo">Ativo (Permitido operar)</MenuItem>
-                <MenuItem value="inativo">Inativo (Bloqueado/Pendente)</MenuItem>
+                <MenuItem value="ativo">Ativo (Pode operar)</MenuItem>
+                <MenuItem value="inativo-temporario">Desativado temporariamente</MenuItem>
+                <MenuItem value="inativo">Desativado</MenuItem>
               </Select>
             </FormControl>
+            {status === 'inativo-temporario' && (
+              <TextField
+                label="Reativar automaticamente em"
+                type="date"
+                fullWidth
+                value={reativarEm}
+                onChange={event => setReativarEm(event.target.value)}
+                size="small"
+                className="col-span-2"
+                required
+                slotProps={{ inputLabel: { shrink: true } }}
+                helperText="Escolha a data em que o contribuinte será reativado automaticamente."
+                id="cont-field-reativar-em"
+              />
+            )}
           </div>
+          )}
         </DialogContent>
 
         <DialogActions sx={{ px: 3, py: 2 }}>
-          <Button onClick={() => setOpenDialog(false)} color="inherit">Cancelar</Button>
-          <Button onClick={handleSave} variant="contained" id="btn-save-contribuinte">Salvar Ficha</Button>
+          <Button onClick={() => setOpenDialog(false)} color="inherit" disabled={isSaving}>Cancelar</Button>
+          <Button onClick={handleSave} variant="contained" id="btn-save-contribuinte" disabled={isSaving}>
+            {isSaving ? 'A guardar...' : isStatusOnlyEditor ? 'Salvar Estado' : 'Salvar Ficha'}
+          </Button>
         </DialogActions>
+      </Dialog>
+
+      <Dialog open={viewingItem !== null} onClose={() => setViewingItem(null)} maxWidth="sm" fullWidth>
+        {viewingItem && (
+          <>
+            {(() => {
+              const cardMarket = mercados.find(market => market.id === viewingItem.mercadoId);
+              const cardMarketName = cardMarket?.nome || 'Não alocado';
+              const cardMunicipality = municipios.find(municipio => municipio.id === cardMarket?.municipioId)?.nome
+                || configuracoes.nomeMunicipio
+                || 'CÂMARA MUNICIPAL';
+              const cardMunicipalitySuffix = getMunicipalityNameSuffix(cardMunicipality);
+              return (
+                <>
+            <DialogTitle sx={{ pb: 1 }}>
+              <Typography variant="h6" sx={{ fontWeight: 700 }}>Cartão de Utente</Typography>
+              <Typography variant="body2" color="text.secondary">
+                Modelo vertical PVC com identidade municipal e logo do Sistema Receita 360.
+              </Typography>
+            </DialogTitle>
+            <DialogContent dividers sx={{ bgcolor: 'grey.100', display: 'flex', justifyContent: 'center', py: 4 }}>
+              <Box
+                sx={{
+                  width: '100%',
+                  maxWidth: 340,
+                  aspectRatio: '54 / 85.6',
+                  overflow: 'hidden',
+                  borderRadius: 1,
+                  border: '1px solid #ddd',
+                  bgcolor: '#fff',
+                  boxShadow: '0 14px 34px rgba(15, 45, 75, 0.2)',
+                  position: 'relative',
+                  display: 'flex',
+                  flexDirection: 'column',
+                }}
+              >
+                <Box
+                  sx={{
+                    flex: '0 0 23%',
+                    px: 1,
+                    display: 'grid',
+                    gridTemplateColumns: '20% 1fr 20%',
+                    alignItems: 'center',
+                    gap: 0.5,
+                  }}
+                >
+                  {configuracoes.logoCamara
+                    ? <Box component="img" src={configuracoes.logoCamara} alt="Brasão municipal" sx={{ width: '100%', maxHeight: '78%', objectFit: 'contain' }} />
+                    : <Box sx={{ width: '78%', aspectRatio: '1', mx: 'auto', border: '2px solid #08713b', borderRadius: '50%', display: 'grid', placeItems: 'center', color: '#08713b', fontSize: { xs: 7, sm: 10 }, fontWeight: 900 }}>MUNICÍPIO</Box>}
+                  <Box sx={{ minWidth: 0, textAlign: 'center' }}>
+                    <Typography sx={{ fontSize: { xs: 6, sm: 8 }, lineHeight: 1.2, fontWeight: 900, color: '#111', textTransform: 'uppercase' }}>
+                      REPÚBLICA DA GUINÉ-BISSAU
+                    </Typography>
+                    <Typography noWrap sx={{ fontSize: { xs: 5, sm: 6 }, lineHeight: 1.2, fontWeight: 900, color: '#111', textTransform: 'uppercase', mt: 0.35 }}>
+                      MINISTÉRIO DA ADMINISTRAÇÃO TERRITORIAL E PODER LOCAL
+                    </Typography>
+                    <Typography sx={{ fontSize: { xs: 6, sm: 8 }, lineHeight: 1.2, fontWeight: 900, color: '#111', textTransform: 'uppercase', mt: 0.35 }}>
+                      CÂMARA MUNICIPAL
+                    </Typography>
+                    {cardMunicipalitySuffix && (
+                      <Typography sx={{ fontSize: { xs: 5, sm: 7 }, lineHeight: 1.1, fontWeight: 900, color: '#111', textTransform: 'uppercase' }}>
+                        {cardMunicipalitySuffix}
+                      </Typography>
+                    )}
+                  </Box>
+                  <Box sx={{ width: '95%', aspectRatio: '1', mx: 'auto', borderRadius: '50%', bgcolor: '#70c4ed', display: 'grid', placeItems: 'center', color: '#0b4ea2', fontWeight: 1000, fontSize: { xs: 12, sm: 18 }, letterSpacing: -1, border: '2px solid #d7effb', boxShadow: 'inset 0 0 0 2px rgba(255,255,255,.65)' }}>
+                    R3
+                  </Box>
+                </Box>
+
+                <Box
+                  sx={{
+                    flex: '0 0 8%',
+                    color: '#08713b',
+                    textAlign: 'center',
+                    textTransform: 'uppercase',
+                    fontSize: { xs: 12, sm: 18 },
+                    fontWeight: 900,
+                    letterSpacing: 0.4,
+                    overflow: 'hidden',
+                    whiteSpace: 'nowrap',
+                    display: 'grid',
+                    placeItems: 'center',
+                  }}
+                >
+                  {cardMarketName}
+                </Box>
+
+                <Box
+                  sx={{
+                    flex: '0 0 7.5%',
+                    mx: '6%',
+                    borderRadius: 2,
+                    bgcolor: '#08713b',
+                    color: 'white',
+                    textAlign: 'center',
+                    textTransform: 'uppercase',
+                    letterSpacing: 0.8,
+                    fontSize: { xs: 13, sm: 20 },
+                    fontWeight: 900,
+                    display: 'grid',
+                    placeItems: 'center',
+                  }}
+                >
+                  CARTÃO DE UTENTE
+                </Box>
+
+                <Box
+                  sx={{
+                    flex: 1,
+                    minHeight: 0,
+                    px: '4%',
+                    pt: '5%',
+                    pb: '2%',
+                    display: 'grid',
+                    gridTemplateColumns: '45% 1fr',
+                    gridTemplateRows: '1fr',
+                    gap: '5%',
+                    position: 'relative',
+                    background: '#fff',
+                  }}
+                >
+                  {configuracoes.logoCamara && (
+                    <Box
+                      component="img"
+                      src={configuracoes.logoCamara}
+                      alt=""
+                      sx={{
+                        position: 'absolute',
+                        width: '82%',
+                        height: '85%',
+                        objectFit: 'contain',
+                        opacity: 0.12,
+                        left: '12%',
+                        top: '8%',
+                        pointerEvents: 'none',
+                      }}
+                    />
+                  )}
+                  <Box sx={{ zIndex: 1, minWidth: 0 }}>
+                    <Avatar
+                      src={viewingItem.foto}
+                      alt={viewingItem.nome}
+                      variant="rounded"
+                      sx={{
+                        width: '100%',
+                        height: '76%',
+                        minHeight: 100,
+                        bgcolor: '#e5efe9',
+                        color: '#08713b',
+                        border: '2px solid #50695c',
+                        borderRadius: 1.5,
+                        boxShadow: '0 2px 5px rgba(22, 57, 40, 0.15)',
+                        fontSize: { xs: 34, sm: 50 },
+                        fontWeight: 700,
+                      }}
+                    >
+                      {viewingItem.nome.charAt(0)}
+                    </Avatar>
+                    {viewingItem.qrCode && (
+                      <Typography noWrap sx={{ mt: 0.75, textAlign: 'center', fontSize: { xs: 9, sm: 13 }, fontWeight: 900 }}>
+                        {viewingItem.qrCode}
+                      </Typography>
+                    )}
+                  </Box>
+                  <Box sx={{ zIndex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+                    {[
+                      ['NOME', viewingItem.nome],
+                      ['NIF', viewingItem.documento],
+                      ['NÚMERO DE BANCA', viewingItem.numBanca || '-'],
+                      ['MERCADO', cardMarketName],
+                      ['ATIVIDADE', viewingItem.atividade || getCategoryName(viewingItem.categoria) || '-'],
+                      ['DATA DE VALIDADE', 'Não definida'],
+                    ].map(([label, value]) => (
+                      <Box key={label} sx={{ minWidth: 0, py: { xs: 0.4, sm: 0.7 }, borderBottom: '1px solid #aaa' }}>
+                        <Typography sx={{ fontSize: { xs: 7, sm: 10 }, color: '#08713b', fontWeight: 900, lineHeight: 1.1 }}>
+                          {label}
+                        </Typography>
+                        <Typography sx={{ fontSize: { xs: 9, sm: 13 }, color: '#111', fontWeight: 700, lineHeight: 1.2, overflowWrap: 'anywhere', maxHeight: 38, overflow: 'hidden' }}>
+                          {value}
+                        </Typography>
+                      </Box>
+                    ))}
+                  </Box>
+                </Box>
+
+                <Box
+                  sx={{
+                    flex: '0 0 13%',
+                    px: 1,
+                    position: 'relative',
+                    background: 'linear-gradient(17deg, #df101b 0 31%, #f2d419 32% 38%, #07833a 39% 100%)',
+                    display: 'flex',
+                    justifyContent: 'flex-end',
+                    alignItems: 'center',
+                  }}
+                >
+                  <Typography sx={{ position: 'absolute', left: '7%', bottom: '5%', color: '#111', fontSize: { xs: 26, sm: 38 }, lineHeight: 1 }}>★</Typography>
+                  <Box
+                    sx={{
+                      minWidth: '48%',
+                      py: 0.75,
+                      px: 1.5,
+                      border: '2px solid #b4d4bd',
+                      borderRadius: 6,
+                      bgcolor: '#08713b',
+                      color: 'white',
+                      textAlign: 'center',
+                      fontSize: { xs: 14, sm: 21 },
+                      fontWeight: 900,
+                    }}
+                  >
+                    {viewingItem.status === 'ativo' ? 'ATIVO  ✓' : viewingItem.reativarEm ? 'TEMPORÁRIO' : 'DESATIVADO'}
+                  </Box>
+                </Box>
+              </Box>
+            </DialogContent>
+            <DialogActions sx={{ px: 3, py: 2 }}>
+              <Button onClick={() => handlePrintFicha(viewingItem)} startIcon={<Printer size={16} />} variant="outlined">
+                Imprimir cartão PVC
+              </Button>
+              {canEdit && (
+                <Button
+                  onClick={() => {
+                    handleOpenEdit(viewingItem);
+                    setViewingItem(null);
+                  }}
+                  startIcon={<Edit2 size={16} />}
+                  variant="contained"
+                >
+                  Modificar
+                </Button>
+              )}
+              <Button onClick={() => setViewingItem(null)} color="inherit">Fechar</Button>
+            </DialogActions>
+                </>
+              );
+            })()}
+          </>
+        )}
       </Dialog>
 
       {/* Modal de Câmera e Otimização de Foto em até 70 KB */}
@@ -743,31 +1274,8 @@ export default function Contribuintes() {
         onClose={() => setOpenQrDialog(false)}
         onQrCodeSelected={(code) => setQrCode(code)}
         initialCode={qrCode}
-        contribuinteDoc={documento}
       />
 
-      {/* Diálogo de Confirmação de Exclusão de Segurança */}
-      <Dialog open={deleteId !== null} onClose={() => setDeleteId(null)}>
-        <DialogTitle sx={{ fontWeight: 'bold', color: 'error.main' }}>
-          Confirmar Exclusão de Contribuinte
-        </DialogTitle>
-        <DialogContent dividers>
-          <Typography variant="body1">
-            Deseja realmente excluir este contribuinte/feirante? Esta ação é irreversível e removerá todos os registros cadastrais deste contribuinte.
-          </Typography>
-          <Typography variant="body2" sx={{ mt: 2, color: 'text.secondary', fontStyle: 'italic' }}>
-            Nota: Para fins de rastreabilidade de segurança e conformidade, esta ação será registrada nos logs de auditoria contendo sua identificação.
-          </Typography>
-        </DialogContent>
-        <DialogActions sx={{ px: 3, py: 2 }}>
-          <Button onClick={() => setDeleteId(null)} color="inherit" variant="outlined" sx={{ textTransform: 'none' }}>
-            Cancelar
-          </Button>
-          <Button onClick={handleConfirmDelete} color="error" variant="contained" sx={{ textTransform: 'none' }} id="confirm-delete-cont-btn">
-            Excluir de Forma Permanente
-          </Button>
-        </DialogActions>
-      </Dialog>
     </Box>
   );
 }

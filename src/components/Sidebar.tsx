@@ -3,7 +3,7 @@ import { NavLink } from 'react-router-dom';
 import { useAppStore } from '../store';
 import { 
   LayoutDashboard, Building2, Store, Users, UserCheck, 
-  Receipt, Landmark, ShieldAlert, Settings, User, BarChart3, HelpCircle
+  Receipt, Landmark, ShieldAlert, Settings, User, BarChart3, Tags
 } from 'lucide-react';
 
 interface SidebarProps {
@@ -13,25 +13,6 @@ interface SidebarProps {
 
 export default function Sidebar({ mobileOpen, onClose }: SidebarProps) {
   const { activeProfile, configuracoes } = useAppStore();
-  const [dbConnected, setDbConnected] = React.useState<boolean | null>(null);
-
-  React.useEffect(() => {
-    const checkConnection = async () => {
-      try {
-        const res = await fetch('/api/health');
-        if (res.ok) {
-          setDbConnected(true);
-        } else {
-          setDbConnected(false);
-        }
-      } catch (err) {
-        setDbConnected(false);
-      }
-    };
-    checkConnection();
-    const interval = setInterval(checkConnection, 10000);
-    return () => clearInterval(interval);
-  }, []);
 
   // Define navigation configuration with authorized profiles
   const navItems = [
@@ -80,6 +61,12 @@ export default function Sidebar({ mobileOpen, onClose }: SidebarProps) {
         'Administrador Municipal', 'Supervisor Municipal', 'Financeiro', 'Tesoureiro', 'Fiscal', 'Agente de Cobrança', 'Consulta / Relatórios',
         'Super Administrador', 'Super Admin', 'Administrator', 'Departamento de Mercados', 'Fiscal Supervisor', 'Supervisor', 'Collection Agent'
       ] 
+    },
+    {
+      name: 'Categorias de Contribuintes',
+      path: '/categorias-contribuintes',
+      icon: Tags,
+      roles: ['Platform Owner', 'Super Administrador', 'Super Admin', 'Administrator']
     },
     { 
       name: 'Tipos de Receita', 
@@ -174,7 +161,7 @@ export default function Sidebar({ mobileOpen, onClose }: SidebarProps) {
           R3
         </div>
         <div>
-          <h1 className="text-xl font-bold leading-none text-white tracking-tight">Receita 360 web</h1>
+          <h1 className="text-xl font-bold leading-none text-white tracking-tight">Receita 360</h1>
           <p className="text-[10px] text-blue-200 uppercase tracking-widest mt-1">Gestão Municipal</p>
         </div>
       </div>
@@ -216,26 +203,9 @@ export default function Sidebar({ mobileOpen, onClose }: SidebarProps) {
 
       {/* Footer Branding Info */}
       <div className="p-4 border-t border-blue-800/50 text-center bg-blue-950/20 text-blue-200">
-        <div className="flex items-center justify-center gap-1.5 mb-1.5 text-[10px] font-semibold">
-          {dbConnected === null ? (
-            <>
-              <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
-              <span className="text-amber-300">Testando Supabase...</span>
-            </>
-          ) : dbConnected ? (
-            <>
-              <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 border border-emerald-500 shadow-xs" />
-              <span className="text-emerald-300">Supabase: CONECTADO</span>
-            </>
-          ) : (
-            <>
-              <span className="w-2.5 h-2.5 rounded-full bg-rose-500 animate-pulse" />
-              <span className="text-rose-400">Supabase: ERRO CONEXÃO</span>
-            </>
-          )}
-        </div>
-        <div className="text-[10px] text-blue-300">© 2026 Receita 360</div>
-        <div className="text-[9px] text-blue-300/80 mt-0.5 font-mono">Sincronizado com Mobile • v2.4.0</div>
+        <div className="text-[10px] text-blue-200 font-semibold">Sistema Integrado Receita 360</div>
+        <div className="text-[10px] text-blue-300 mt-1">© 2026 GS-TIC SARL</div>
+        <div className="text-[9px] text-blue-300/80 mt-0.5 font-mono">Versão 1.13</div>
       </div>
     </div>
   );

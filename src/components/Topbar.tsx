@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useAppStore } from '../store';
 import { 
-  Bell, Search, Sun, Moon, Check, LogOut, Shield, Wifi, ChevronDown
+  Bell, Search, Sun, Moon, LogOut, Shield, Wifi, ChevronDown
 } from 'lucide-react';
 import { Menu, MenuItem, IconButton, Badge, Tooltip, Typography, Divider } from '@mui/material';
 
@@ -12,13 +12,12 @@ interface TopbarProps {
 export default function Topbar({ onToggleMobileMenu }: TopbarProps) {
   const { 
     activeProfile, 
-    availableUsers, 
-    setProfile, 
     darkMode, 
     toggleDarkMode,
     searchQuery,
     setSearchQuery,
     notifications,
+    markNotificationRead,
     markAllNotificationsRead,
     clearNotifications,
     configuracoes,
@@ -28,8 +27,21 @@ export default function Topbar({ onToggleMobileMenu }: TopbarProps) {
 
   const [profileAnchor, setProfileAnchor] = useState<null | HTMLElement>(null);
   const [notificationAnchor, setNotificationAnchor] = useState<null | HTMLElement>(null);
+  const [isOnline, setIsOnline] = useState(() => navigator.onLine);
 
   const unreadNotifications = notifications.filter(n => !n.read).length;
+
+  useEffect(() => {
+    const updateOnlineStatus = () => setIsOnline(navigator.onLine);
+
+    window.addEventListener('online', updateOnlineStatus);
+    window.addEventListener('offline', updateOnlineStatus);
+
+    return () => {
+      window.removeEventListener('online', updateOnlineStatus);
+      window.removeEventListener('offline', updateOnlineStatus);
+    };
+  }, []);
 
   const handleProfileOpen = (event: React.MouseEvent<HTMLElement>) => {
     setProfileAnchor(event.currentTarget);
@@ -37,11 +49,6 @@ export default function Topbar({ onToggleMobileMenu }: TopbarProps) {
 
   const handleProfileClose = () => {
     setProfileAnchor(null);
-  };
-
-  const handleProfileSelect = (profile: any) => {
-    setProfile(profile);
-    handleProfileClose();
   };
 
   const handleNotificationOpen = (event: React.MouseEvent<HTMLElement>) => {
@@ -83,12 +90,18 @@ export default function Topbar({ onToggleMobileMenu }: TopbarProps) {
       {/* Action Icons */}
       <div className="flex items-center gap-3">
         
-        {/* Real-time Status */}
-        <Tooltip title="Sincronizado em tempo real com a base de dados Supabase" arrow>
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-50 dark:bg-emerald-500/10 border border-emerald-200 dark:border-emerald-500/20 text-emerald-600 dark:text-emerald-400 cursor-help" id="sync-status-badge">
-            <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-            <span className="text-[11px] font-semibold tracking-wide uppercase hidden sm:inline">Supabase Ativo</span>
-            <Wifi size={13} className="sm:hidden" />
+        {/* Internet connectivity status */}
+        <Tooltip title={isOnline ? 'Conexão de rede ativa' : 'Sem conexão de rede'} arrow>
+          <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full border cursor-help ${
+            isOnline
+              ? 'bg-emerald-50 dark:bg-emerald-500/10 border-emerald-200 dark:border-emerald-500/20 text-emerald-600 dark:text-emerald-400'
+              : 'bg-rose-50 dark:bg-rose-500/10 border-rose-200 dark:border-rose-500/20 text-rose-600 dark:text-rose-400'
+          }`} id="internet-status-badge">
+            <div className={`w-2 h-2 rounded-full ${isOnline ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'}`} />
+            <span className="text-[11px] font-semibold tracking-wide uppercase hidden sm:inline">
+              {isOnline ? 'Internet Ativa' : 'Sem Internet'}
+            </span>
+            <Wifi size={13} className={`sm:hidden ${isOnline ? '' : 'opacity-50'}`} />
           </div>
         </Tooltip>
 
@@ -116,7 +129,7 @@ export default function Topbar({ onToggleMobileMenu }: TopbarProps) {
           </IconButton>
         </Tooltip>
 
-        {/* User Account / Profile Swapper */}
+        {/* Connected account and profile */}
         <div className="flex items-center gap-2 pl-6 border-l border-slate-200 dark:border-slate-800">
           <button 
             onClick={handleProfileOpen}
@@ -154,7 +167,7 @@ export default function Topbar({ onToggleMobileMenu }: TopbarProps) {
                 onClick={markAllNotificationsRead} 
                 className="text-xs text-blue-500 hover:underline font-semibold"
               >
-                Lidas
+                Marcar todas como lidas
               </button>
             )}
           </div>
@@ -169,6 +182,14 @@ export default function Topbar({ onToggleMobileMenu }: TopbarProps) {
                     <span className="text-[9px] text-slate-400">{n.time}</span>
                   </div>
                   <span className="text-xs text-slate-600 dark:text-slate-300 leading-snug">{n.message}</span>
+                  {!n.read && (
+                    <button
+                      onClick={() => markNotificationRead(n.id)}
+                      className="self-end mt-1 text-xs text-blue-500 hover:underline font-semibold"
+                    >
+                      Marcar como lida
+                    </button>
+                  )}
                 </div>
               ))
             )}
@@ -184,7 +205,7 @@ export default function Topbar({ onToggleMobileMenu }: TopbarProps) {
           </div>
         </Menu>
 
-        {/* Profiles Select Dropdown menu */}
+        {/* Connected profile menu */}
         <Menu
           anchorEl={profileAnchor}
           open={Boolean(profileAnchor)}
@@ -198,31 +219,16 @@ export default function Topbar({ onToggleMobileMenu }: TopbarProps) {
           }}
         >
           <div className="px-4 py-3 bg-slate-50 dark:bg-slate-950/40">
-            <Typography variant="caption" className="text-slate-400 block font-semibold mb-1 uppercase tracking-wide">Alternar Perfil Administrativo</Typography>
-            <Typography variant="body2" className="font-bold dark:text-white">Selecione para testar acessos:</Typography>
+            <Typography variant="caption" className="text-slate-400 block font-semibold mb-1 uppercase tracking-wide">Perfil conectado</Typography>
+            <Typography variant="body2" className="font-bold dark:text-white">{currentUser?.perfil || activeProfile}</Typography>
           </div>
           <Divider />
-          {['Platform Owner', 'Super Administrador', 'Administrador Municipal', 'Diretor Financeiro', 'Departamento de Mercados', 'Fiscal Supervisor']
-            .filter((prof) => {
-              const isAdmin = ['Administrador Municipal', 'Administrator'].includes(activeProfile);
-              if (isAdmin && ['Super Administrador', 'Super Admin', 'Platform Owner'].includes(prof)) {
-                return false;
-              }
-              return true;
-            })
-            .map((prof) => (
-            <MenuItem 
-              key={prof} 
-              onClick={() => handleProfileSelect(prof)}
-              className="flex items-center justify-between py-2.5 px-4 text-xs dark:text-slate-200"
-            >
-              <div className="flex items-center gap-2">
-                <Shield size={14} className="text-blue-500" />
-                <span className={activeProfile === prof ? 'font-bold text-blue-600 dark:text-blue-400' : ''}>{prof}</span>
-              </div>
-              {activeProfile === prof && <Check size={14} className="text-green-500" />}
+          <MenuItem disabled className="py-2.5 px-4 text-xs dark:text-slate-200">
+            <div className="flex items-center gap-2">
+              <Shield size={14} className="text-blue-500" />
+              <span>{currentUser?.perfil || activeProfile}</span>
+            </div>
             </MenuItem>
-          ))}
           <Divider />
           <MenuItem 
             onClick={() => {
@@ -232,7 +238,7 @@ export default function Topbar({ onToggleMobileMenu }: TopbarProps) {
             className="text-red-500 text-xs py-2.5 px-4 flex items-center gap-2 cursor-pointer"
           >
             <LogOut size={14} />
-            <span>Sair do Painel</span>
+            <span>Desconectar</span>
           </MenuItem>
         </Menu>
 

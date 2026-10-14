@@ -3,22 +3,20 @@ import {
   Dialog, DialogTitle, DialogContent, DialogActions, Button, 
   Box, Typography, TextField, IconButton, Alert, Chip, InputAdornment 
 } from '@mui/material';
-import { QrCode, Camera, Check, X, Sparkles, RefreshCw } from 'lucide-react';
+import { QrCode, Camera, Check, X } from 'lucide-react';
 
 interface QrScannerDialogProps {
   open: boolean;
   onClose: () => void;
   onQrCodeSelected: (code: string) => void;
   initialCode?: string;
-  contribuinteDoc?: string;
 }
 
 export const QrScannerDialog: React.FC<QrScannerDialogProps> = ({
   open,
   onClose,
   onQrCodeSelected,
-  initialCode = '',
-  contribuinteDoc = ''
+  initialCode = ''
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -76,7 +74,7 @@ export const QrScannerDialog: React.FC<QrScannerDialogProps> = ({
         animationFrameRef.current = requestAnimationFrame(scanLoop);
       }
     } catch (err: any) {
-      setCameraError('Câmera não iniciada. Digite o código manualmente ou use a geração automática.');
+      setCameraError('Câmera não iniciada. Digite o código manualmente ou tente novamente.');
       setCameraActive(false);
     }
   };
@@ -106,13 +104,6 @@ export const QrScannerDialog: React.FC<QrScannerDialogProps> = ({
       stopCamera();
     };
   }, [open, initialCode]);
-
-  const handleGenerateRandom = () => {
-    const prefix = contribuinteDoc ? contribuinteDoc.replace(/[^a-zA-Z0-9]/g, '').toUpperCase() : 'QR';
-    const randCode = `QR-FEIRANTE-${prefix}-${Math.floor(1000 + Math.random() * 9000)}`;
-    setManualCode(randCode);
-    setDetectedCode(randCode);
-  };
 
   const handleConfirm = () => {
     const code = manualCode.trim() || detectedCode?.trim();
@@ -172,7 +163,7 @@ export const QrScannerDialog: React.FC<QrScannerDialogProps> = ({
             fullWidth
             size="small"
             label="Código do QR Code / Tag NFC"
-            placeholder="Ex: QR-FEIRANTE-NIF144798"
+            placeholder="Digite ou leia um código existente"
             value={manualCode}
             onChange={(e) => setManualCode(e.target.value.toUpperCase())}
             slotProps={{
@@ -187,16 +178,6 @@ export const QrScannerDialog: React.FC<QrScannerDialogProps> = ({
             }}
           />
 
-          <Button
-            size="small"
-            variant="outlined"
-            color="secondary"
-            startIcon={<Sparkles size={14} />}
-            onClick={handleGenerateRandom}
-            sx={{ textTransform: 'none', fontSize: '11px', alignSelf: 'flex-start' }}
-          >
-            Gerar QR Code Automático do Feirante
-          </Button>
         </Box>
       </DialogContent>
 

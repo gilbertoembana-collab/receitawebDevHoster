@@ -13,6 +13,7 @@ import Municipios from './pages/Municipios';
 import Mercados from './pages/Mercados';
 import Agentes from './pages/Agentes';
 import Contribuintes from './pages/Contribuintes';
+import CategoriasContribuintes from './pages/CategoriasContribuintes';
 import TiposReceita from './pages/TiposReceita';
 import Pagamentos from './pages/Pagamentos';
 import Financeiro from './pages/Financeiro';
@@ -94,6 +95,14 @@ export default function App() {
                 <Contribuintes />
               </AdminLayout>
             } 
+          />
+          <Route
+            path="/categorias-contribuintes"
+            element={
+              <AdminLayout>
+                <CategoriasContribuintes />
+              </AdminLayout>
+            }
           />
           <Route 
             path="/tipos-receita" 

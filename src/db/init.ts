@@ -1,6 +1,7 @@
 import pkg from 'pg';
 const { Pool } = pkg;
 import { createPool } from './index.ts';
+import { hashPassword, migratePlaintextPasswords } from '../auth/security.js';
 
 export async function initializeDatabase() {
   const pool = createPool();
@@ -16,45 +17,6 @@ export async function initializeDatabase() {
 
   try {
     await client.query('BEGIN');
-
-    // ==========================================
-    // 1. DROP ALL UNUSED LEGACY TABLES (IF EXIST)
-    // ==========================================
-    await client.query(`
-      DROP TABLE IF EXISTS receipt_items CASCADE;
-      DROP TABLE IF EXISTS receipts CASCADE;
-      DROP TABLE IF EXISTS payments CASCADE;
-      DROP TABLE IF EXISTS cash_transactions CASCADE;
-      DROP TABLE IF EXISTS daily_cash CASCADE;
-      DROP TABLE IF EXISTS market_stalls CASCADE;
-      DROP TABLE IF EXISTS companies CASCADE;
-      DROP TABLE IF EXISTS user_roles CASCADE;
-      DROP TABLE IF EXISTS collection_agents CASCADE;
-      DROP TABLE IF EXISTS taxpayers CASCADE;
-      DROP TABLE IF EXISTS municipal_markets CASCADE;
-      DROP TABLE IF EXISTS neighborhoods CASCADE;
-      DROP TABLE IF EXISTS villages CASCADE;
-      DROP TABLE IF EXISTS zones CASCADE;
-      DROP TABLE IF EXISTS municipalities CASCADE;
-      DROP TABLE IF EXISTS regions CASCADE;
-      DROP TABLE IF EXISTS roles CASCADE;
-      DROP TABLE IF EXISTS users CASCADE;
-      DROP TABLE IF EXISTS tax_rates CASCADE;
-      DROP TABLE IF EXISTS tax_categories CASCADE;
-      DROP TABLE IF EXISTS payment_methods CASCADE;
-      DROP TABLE IF EXISTS notifications CASCADE;
-      DROP TABLE IF EXISTS audit_logs CASCADE;
-      DROP TABLE IF EXISTS system_settings CASCADE;
-      DROP TABLE IF EXISTS licenses CASCADE;
-      DROP TABLE IF EXISTS devices CASCADE;
-      DROP TABLE IF EXISTS sync_logs CASCADE;
-      DROP TABLE IF EXISTS reports CASCADE;
-      DROP TABLE IF EXISTS despesas CASCADE;
-      DROP TABLE IF EXISTS recibos CASCADE;
-      DROP TABLE IF EXISTS logs_auditoria CASCADE;
-      DROP TABLE IF EXISTS relatorios_agendados CASCADE;
-      DROP TABLE IF EXISTS metas_arrecadacao CASCADE;
-    `);
 
     // ==========================================
     // 2. CREATE ACTIVE CORE TABLES
@@ -169,8 +131,12 @@ export async function initializeDatabase() {
         num_banca TEXT NOT NULL,
         categoria TEXT NOT NULL,
         atividade TEXT NOT NULL,
+        dimensao TEXT,
+        data_registro TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        agente_id TEXT,
         observacoes TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'ativo',
+        reativar_em DATE,
         qr_code TEXT,
         area_m2 REAL,
         foto TEXT
@@ -178,6 +144,147 @@ export async function initializeDatabase() {
       ALTER TABLE contribuintes ADD COLUMN IF NOT EXISTS qr_code TEXT;
       ALTER TABLE contribuintes ADD COLUMN IF NOT EXISTS area_m2 REAL;
       ALTER TABLE contribuintes ADD COLUMN IF NOT EXISTS foto TEXT;
+      ALTER TABLE contribuintes ADD COLUMN IF NOT EXISTS dimensao TEXT;
+      ALTER TABLE contribuintes ADD COLUMN IF NOT EXISTS reativar_em DATE;
+    `);
+    const registrationDateColumn = await client.query(`
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = current_schema()
+        AND table_name = 'contribuintes'
+        AND column_name = 'data_registro'
+    `);
+    await client.query(`
+      ALTER TABLE contribuintes ADD COLUMN IF NOT EXISTS data_registro TIMESTAMPTZ;
+      ALTER TABLE contribuintes ADD COLUMN IF NOT EXISTS agente_id TEXT;
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS categoria_contribuintes (
+        id TEXT PRIMARY KEY,
+        nome TEXT NOT NULL,
+        descricao TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'ativo'
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS categoria_contribuintes_nome_unique_idx
+        ON categoria_contribuintes (LOWER(nome));
+    `);
+
+    const contributorCategories = [
+      ['cat-alimentos-frescos', 'Alimentos e Produtos Frescos', 'Comércio de alimentos, produtos agrícolas, carnes, peixes e bebidas.'],
+      ['cat-vestuario', 'Vestuário, Tecidos e Calçados', 'Roupas, tecidos, calçados e acessórios de vestuário.'],
+      ['cat-eletronica', 'Eletrônica, Telecomunicações e Reparação', 'Equipamentos eletrônicos, celulares, acessórios e serviços técnicos.'],
+      ['cat-automovel', 'Automóvel e Peças', 'Peças, acessórios e artigos para veículos.'],
+      ['cat-construcao', 'Construção e Materiais', 'Materiais de construção, eletricidade, canalização e ferramentas.'],
+      ['cat-cosmetica', 'Cosmética e Higiene', 'Cosméticos, produtos de beleza, higiene e perfumaria.'],
+      ['cat-artesanato', 'Artesanato e Produção', 'Produtos artesanais, confecção e produção local.'],
+      ['cat-comercio-geral', 'Comércio Geral/Por Classificar', 'Produtos diversos ou atividade ainda não especificada.'],
+    ] as const;
+
+    for (const [id, nome, descricao] of contributorCategories) {
+      await client.query(
+        `INSERT INTO categoria_contribuintes (id, nome, descricao, status)
+         VALUES ($1, $2, $3, 'ativo')
+         ON CONFLICT (id) DO NOTHING`,
+        [id, nome, descricao],
+      );
+    }
+
+    await client.query(`
+      UPDATE contribuintes
+      SET categoria = CASE
+        WHEN atividade ~* '(roup|vestu|tecid|camisol|cal[cç]ad|sapato|chinel|alfaiat|confec|boutique)'
+          THEN 'Vestuário, Tecidos e Calçados'
+        WHEN atividade ~* '(celular|telefone|telem[oó]vel|eletr[oó]nic|comput|inform[aá]tic|repara[cç][aã]o.*tele|t[eé]cnic)'
+          THEN 'Eletrônica, Telecomunicações e Reparação'
+        WHEN atividade ~* '(carro|autom[oó]vel|pe[cç]as.*ve[ií]cul|pe[cç]as de carro)'
+          THEN 'Automóvel e Peças'
+        WHEN atividade ~* '(constru[cç][aã]o|canaliza[cç][aã]o|materiais de eletricidade|cimento|ferramentas|materiais de constru[cç][aã]o)'
+          THEN 'Construção e Materiais'
+        WHEN atividade ~* '(cosm[eé]tic|higiene|perfum|sab[oã]es)'
+          THEN 'Cosmética e Higiene'
+        WHEN atividade ~* '(artesan|cestaria|escultura)'
+          THEN 'Artesanato e Produção'
+        WHEN atividade ~* '(alimento|comida|legume|hortali[cç]|peixe|carne|fruta|bebida|cereal|mandioca|batata)'
+          OR categoria IN ('Alimentos', 'Carnes/Peixes', 'Cereais')
+          THEN 'Alimentos e Produtos Frescos'
+        WHEN categoria = 'Confecções' THEN 'Vestuário, Tecidos e Calçados'
+        WHEN categoria = 'Eletrônicos' THEN 'Eletrônica, Telecomunicações e Reparação'
+        WHEN categoria = 'Artesanato' THEN 'Artesanato e Produção'
+        ELSE 'Comércio Geral/Por Classificar'
+      END,
+      dimensao = CASE
+        WHEN atividade ~* '(atacado|atacadista|grossista|distribuidor|importador)'
+          THEN 'Grande'
+        WHEN atividade ~* '(eletr[oó]nic|celular|telem[oó]vel|pe[cç]as de carro|autom[oó]vel|constru[cç][aã]o|materiais de eletricidade|canaliza[cç][aã]o)'
+          THEN 'Médio'
+        WHEN NULLIF(BTRIM(atividade), '') IS NULL
+          THEN 'Micro'
+        ELSE 'Pequeno'
+      END
+      WHERE dimensao IS NULL OR dimensao NOT IN ('Micro', 'Pequeno', 'Médio', 'Grande');
+    `);
+    await client.query('ALTER TABLE contribuintes ALTER COLUMN dimensao SET NOT NULL;');
+    await client.query(`
+      UPDATE contribuintes AS contribuinte
+      SET categoria = categoria_ref.id
+      FROM categoria_contribuintes AS categoria_ref
+      WHERE contribuinte.categoria = categoria_ref.nome;
+    `);
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1
+          FROM pg_constraint
+          WHERE conname = 'contribuintes_categoria_fk'
+            AND conrelid = 'contribuintes'::regclass
+        ) THEN
+          ALTER TABLE contribuintes
+            ADD CONSTRAINT contribuintes_categoria_fk
+            FOREIGN KEY (categoria)
+            REFERENCES categoria_contribuintes(id)
+            ON DELETE RESTRICT;
+        END IF;
+      END $$;
+    `);
+    const registrationAgentId = 'agen-f7rm38ilf';
+    const registrationAgent = await client.query(
+      'SELECT 1 FROM agentes WHERE id = $1 LIMIT 1',
+      [registrationAgentId],
+    );
+    if (!registrationAgent.rowCount) {
+      throw new Error(`Required contributor registration agent not found: ${registrationAgentId}`);
+    }
+    await client.query(
+      `UPDATE contribuintes
+       SET data_registro = CASE WHEN $2 THEN NOW() ELSE COALESCE(data_registro, NOW()) END,
+           agente_id = COALESCE(agente_id, $1)
+       WHERE $2 OR data_registro IS NULL OR agente_id IS NULL`,
+      [registrationAgentId, registrationDateColumn.rowCount === 0],
+    );
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1
+          FROM pg_constraint
+          WHERE conname = 'contribuintes_agente_fk'
+            AND conrelid = 'contribuintes'::regclass
+        ) THEN
+          ALTER TABLE contribuintes
+            ADD CONSTRAINT contribuintes_agente_fk
+            FOREIGN KEY (agente_id)
+            REFERENCES agentes(id)
+            ON DELETE RESTRICT;
+        END IF;
+      END $$;
+    `);
+    await client.query(`
+      ALTER TABLE contribuintes ALTER COLUMN data_registro SET DEFAULT NOW();
+      ALTER TABLE contribuintes ALTER COLUMN data_registro SET NOT NULL;
+      ALTER TABLE contribuintes ALTER COLUMN agente_id SET NOT NULL;
+      CREATE INDEX IF NOT EXISTS contribuintes_data_registro_idx ON contribuintes(data_registro DESC);
+      CREATE INDEX IF NOT EXISTS contribuintes_agente_idx ON contribuintes(agente_id);
     `);
 
     // 6. Tipos de Receita
@@ -299,31 +406,48 @@ export async function initializeDatabase() {
 
     await client.query('CREATE INDEX IF NOT EXISTS sincronizacao_log_agente_idx ON sincronizacao_log(agente_id);');
 
+    await migratePlaintextPasswords(client);
+
     // ==========================================
     // 4. SEEDING DEFAULT DATA IF EMPTY (Core Administrators Only)
     // ==========================================
 
     // 1. Usuarios (Platform / National level only - No Municipal ID required)
     const countUsers = await client.query('SELECT COUNT(*) FROM usuarios');
-    const SHA256_DEFAULT_PWD = '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92'; // sha256 of '123456'
+    const bootstrapEmail = process.env.BOOTSTRAP_ADMIN_EMAIL?.trim().toLowerCase();
+    const bootstrapPassword = process.env.BOOTSTRAP_ADMIN_PASSWORD;
 
     if (parseInt(countUsers.rows[0].count) === 0) {
-      console.log('Seeding core national administrator accounts with SHA-256 encrypted passwords...');
-      await client.query(`
-        INSERT INTO usuarios (id, nome, email, municipio_id, perfil, status, usuario, senha) VALUES
-        ('user-owner', 'Administrador de Plataforma', 'owner@gstic.gw', NULL, 'Platform Owner', 'ativo', 'owner', '${SHA256_DEFAULT_PWD}'),
-        ('user-nat-admin', 'Administrador Nacional', 'nacional.admin@mat.gw', NULL, 'Administrador Nacional', 'ativo', 'mat.admin', '${SHA256_DEFAULT_PWD}'),
-        ('user-nat-super', 'Supervisor Nacional', 'nacional.super@mat.gw', NULL, 'Supervisor Nacional', 'ativo', 'mat.super', '${SHA256_DEFAULT_PWD}'),
-        ('user-nat-audit', 'Auditor Nacional', 'nacional.auditor@mat.gw', NULL, 'Auditor Nacional', 'ativo', 'mat.auditor', '${SHA256_DEFAULT_PWD}');
-      `);
-    } else {
-      // Automatic security migration: Encrypt any legacy plain-text password to SHA-256
-      await client.query(`
-        UPDATE usuarios 
-        SET senha = '${SHA256_DEFAULT_PWD}'
-        WHERE senha = '123456' OR senha IS NULL OR length(senha) < 60;
-      `);
+      console.log('Seeding the configured bootstrap administrator.');
+      if (bootstrapEmail && bootstrapPassword) {
+        const passwordHash = await hashPassword(bootstrapPassword);
+        const username = process.env.BOOTSTRAP_ADMIN_USERNAME || bootstrapEmail.split('@')[0];
+        await client.query(
+          `INSERT INTO usuarios (id, nome, email, municipio_id, perfil, status, usuario, senha)
+           VALUES ($1, $2, $3, NULL, 'Platform Owner', 'ativo', $4, $5)
+           ON CONFLICT DO NOTHING`,
+          ['user-owner', 'Administrador de Plataforma', bootstrapEmail, username, passwordHash],
+        );
+      } else {
+        console.warn('Bootstrap admin skipped: set BOOTSTRAP_ADMIN_EMAIL and BOOTSTRAP_ADMIN_PASSWORD.');
+      }
     }
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS auth_sessions (
+        id TEXT PRIMARY KEY,
+        family_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        user_type TEXT NOT NULL CHECK (user_type IN ('user', 'agent')),
+        token_hash TEXT NOT NULL UNIQUE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        expires_at TIMESTAMPTZ NOT NULL,
+        revoked_at TIMESTAMPTZ,
+        replaced_by_hash TEXT
+      );
+      CREATE INDEX IF NOT EXISTS auth_sessions_family_id_idx ON auth_sessions(family_id);
+      CREATE INDEX IF NOT EXISTS auth_sessions_user_idx ON auth_sessions(user_id, user_type);
+    `);
 
     // 2. Configuracoes (Standard Neutral Settings with ID 1)
     const countConf = await client.query('SELECT COUNT(*) FROM configuracoes');

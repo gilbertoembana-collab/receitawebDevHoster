@@ -2,9 +2,10 @@ import React, { useState } from 'react';
 import { useAppStore } from '../../store';
 import { LogIn, Mail, Lock, Eye, EyeOff } from 'lucide-react';
 import { dbService } from '../../services/db';
+import { setAccessToken } from '../../services/api';
 
 export default function Login() {
-  const { availableUsers, setCurrentUser, addNotification } = useAppStore();
+  const { setCurrentUser, addNotification } = useAppStore();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -25,12 +26,18 @@ export default function Login() {
     try {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ login: email, password })
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', 'X-Client-Type': 'web' },
+        body: JSON.stringify({ login: email, password }),
       });
 
       if (res.ok) {
         const data = await res.json();
+        if (typeof data.accessToken !== 'string') {
+          setError('Não foi possível iniciar a sessão.');
+          return;
+        }
+        setAccessToken(data.accessToken);
         const loggedUser = data.user;
         setCurrentUser(loggedUser);
         dbService.addAuditLog(
@@ -46,26 +53,8 @@ export default function Login() {
       } else {
         setError('Login ou senha incorreto.');
       }
-    } catch (err) {
-      // Fallback local verification
-      const input = email.toLowerCase().trim();
-      const user = availableUsers.find(
-        (u) =>
-          u.email.toLowerCase() === input ||
-          (u.usuario && u.usuario.toLowerCase() === input) ||
-          u.id.toLowerCase() === input
-      );
-
-      if (!user || user.status === 'inativo') {
-        setError('Login ou senha incorreto.');
-      } else {
-        setCurrentUser(user);
-        addNotification({
-          title: 'Bem-vindo de volta',
-          message: `Sessão iniciada como ${user.nome} (${user.perfil}).`,
-          type: 'success',
-        });
-      }
+    } catch {
+      setError('Não foi possível contactar o servidor. Tente novamente.');
     } finally {
       setIsLoading(false);
     }
@@ -80,7 +69,7 @@ export default function Login() {
             R3
           </div>
           <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-white">
-            Receita 360 web
+            Receita 360
           </h1>
           <p className="text-xs text-[#0B4EA2] dark:text-blue-400 uppercase tracking-widest font-semibold mt-1">
             Gestão Municipal Integrada

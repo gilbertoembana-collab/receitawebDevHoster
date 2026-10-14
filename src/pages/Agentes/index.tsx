@@ -81,7 +81,7 @@ export default function Agentes() {
   const [cargo, setCargo] = useState('');
   const [status, setStatus] = useState<'ativo' | 'inativo'>('ativo');
   const [permissoes, setPermissoes] = useState<string[]>(['Cobrar', 'Imprimir Recibo']);
-  const [senha, setSenha] = useState('123456');
+  const [senha, setSenha] = useState('');
   const [metaDiaria, setMetaDiaria] = useState<number>(configuracoes.metaDiariaAgente ?? 100000);
 
   const filtered = agentes.filter(a => {
@@ -111,7 +111,7 @@ export default function Agentes() {
     setStatus('ativo');
     setPermissoes(['Cobrar', 'Imprimir Recibo']);
     setMetaDiaria(configuracoes.metaDiariaAgente ?? 100000);
-    setSenha('123456');
+    setSenha('');
     setOpenDialog(true);
   };
 
@@ -161,10 +161,10 @@ export default function Agentes() {
       return;
     }
 
-    if (!editingItem && !senha.trim()) {
+    if (!editingItem && (senha.trim().length < 12 || senha.trim().length > 128)) {
       addNotification({
         title: 'Erro de Validação',
-        message: 'Por favor, defina a senha padrão para o novo agente.',
+        message: 'A senha do novo agente deve ter entre 12 e 128 caracteres.',
         type: 'warning'
       });
       return;
@@ -223,7 +223,10 @@ export default function Agentes() {
   };
 
   const handleResetPassword = (item: Agente) => {
-    const tempPassword = Math.random().toString(36).slice(-8).toUpperCase();
+    const randomBytes = new Uint8Array(16);
+    globalThis.crypto.getRandomValues(randomBytes);
+    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    const tempPassword = Array.from(randomBytes, byte => alphabet[byte % alphabet.length]).join('');
     updateAgente(item.id, { 
       resetSenhaPending: true,
       senhaTemporaria: tempPassword 

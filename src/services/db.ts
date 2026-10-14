@@ -1,7 +1,18 @@
 import { 
   Municipio, Mercado, Agente, Contribuinte, TipoReceita, 
-  Pagamento, AuditoriaLog, SincronizacaoLog, SystemConfig, Usuario 
+  Pagamento, AuditoriaLog, SincronizacaoLog, SystemConfig, Usuario, CategoriaContribuinte
 } from '../types';
+import { apiFetch } from './api';
+
+function omitCredentialFields<T>(value: T): T {
+  if (Array.isArray(value)) return value.map(omitCredentialFields) as T;
+  if (!value || typeof value !== 'object') return value;
+  const safe = { ...value } as Record<string, unknown>;
+  for (const key of ['senha', 'senhaTemporaria', 'senha_temporaria', 'password', 'refreshToken', 'accessToken']) {
+    delete safe[key];
+  }
+  return safe as T;
+}
 
 class PostgresSyncEngine {
   private data: {
@@ -10,6 +21,7 @@ class PostgresSyncEngine {
     mercados: Mercado[];
     agentes: Agente[];
     contribuintes: Contribuinte[];
+    categoria_contribuintes: CategoriaContribuinte[];
     tipos_receita: TipoReceita[];
     pagamentos: Pagamento[];
     auditoria: AuditoriaLog[];
@@ -18,9 +30,6 @@ class PostgresSyncEngine {
   };
 
   private listeners: { [collection: string]: Array<(data: any) => void> } = {};
-  private currentMunicipioId: string = '';
-  private currentRole: string = '';
-
   constructor() {
     this.data = {
       usuarios: [],
@@ -28,6 +37,7 @@ class PostgresSyncEngine {
       mercados: [],
       agentes: [],
       contribuintes: [],
+      categoria_contribuintes: [],
       tipos_receita: [],
       pagamentos: [],
       auditoria: [],
@@ -75,7 +85,17 @@ class PostgresSyncEngine {
       try {
         const stored = localStorage.getItem(`receita360_${k}`);
         if (stored) {
-          this.data[k as keyof typeof this.data] = JSON.parse(stored);
+          const parsed = JSON.parse(stored);
+          if (k === 'contribuintes' && Array.isArray(parsed)) {
+            const latest = parsed
+              .filter(item => !['cont-1', 'cont-2', 'cont-3'].includes(item?.id))
+              .sort((a, b) => (Date.parse(b?.dataRegistro || '') || 0) - (Date.parse(a?.dataRegistro || '') || 0))
+              .slice(0, 50)
+              .sort((a, b) => String(a?.nome || '').localeCompare(String(b?.nome || ''), 'pt', { sensitivity: 'base' }));
+            this.data.contribuintes = omitCredentialFields(latest);
+          } else {
+            this.data[k as keyof typeof this.data] = omitCredentialFields(parsed);
+          }
         }
       } catch (e) {
         console.error('Error loading key from localStorage:', k, e);
@@ -95,29 +115,76 @@ class PostgresSyncEngine {
     return this.data;
   }
 
-  public setTenantContext(municipioId: string, role: string) {
-    this.currentMunicipioId = municipioId;
-    this.currentRole = role;
+  public setTenantContext(_municipioId: string, _role: string) {
     this.syncAllWithServer();
   }
 
-  private async syncAllWithServer() {
-    const headers: HeadersInit = {};
-    if (this.currentMunicipioId) {
-      headers['x-municipio-id'] = this.currentMunicipioId;
+  public async loadContributorsPage(page: number, search = ''): Promise<{ items: Contribuinte[]; total: number }> {
+    const query = new URLSearchParams({
+      page: String(page),
+      pageSize: '100',
+      search,
+    });
+    const response = await apiFetch(`/api/contribuintes?${query}`);
+    if (!response.ok) {
+      throw new Error(`Não foi possível carregar os contribuintes (HTTP ${response.status}).`);
     }
-    if (this.currentRole) {
-      headers['x-user-role'] = this.currentRole;
+    const result = await response.json();
+    if (!Array.isArray(result.items) || !Number.isSafeInteger(result.total)) {
+      throw new Error('A resposta do servidor para contribuintes é inválida.');
     }
 
+    return {
+      items: omitCredentialFields(result.items),
+      total: result.total,
+    };
+  }
+
+  public async createContributor(doc: Omit<Contribuinte, 'id' | 'dataRegistro' | 'agenteId'>): Promise<Contribuinte> {
+    const response = await apiFetch('/api/contribuintes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(doc),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.error || `Não foi possível cadastrar o contribuinte (HTTP ${response.status}).`);
+    }
+    const createdContributor = await response.json() as Contribuinte;
+    this.addAuditLog('criacao', `Criado novo registro em contribuintes: ${createdContributor.nome}`);
+    return createdContributor;
+  }
+
+  public async updateContributor(id: string, updates: Partial<Contribuinte>): Promise<Contribuinte> {
+    const response = await apiFetch(`/api/contribuintes/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates),
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.error || `Não foi possível atualizar o contribuinte (HTTP ${response.status}).`);
+    }
+
+    const updatedContributor = await response.json() as Contribuinte;
+    const index = this.data.contribuintes.findIndex(item => item.id === id);
+    if (index !== -1) {
+      this.data.contribuintes[index] = { ...this.data.contribuintes[index], ...updatedContributor };
+      this.saveToLocalStorage('contribuintes');
+      this.notify('contribuintes');
+    }
+    return updatedContributor;
+  }
+
+  private async syncAllWithServer() {
     try {
-      const res = await fetch('/api/sync-state', { headers });
+      const res = await apiFetch('/api/sync-state');
       if (res.ok) {
         const batch = await res.json();
-        const keys = ['usuarios', 'municipios', 'mercados', 'agentes', 'contribuintes', 'tipos_receita', 'pagamentos', 'auditoria', 'sincronizacao'];
+        const keys = ['usuarios', 'municipios', 'mercados', 'agentes', 'contribuintes', 'categoria_contribuintes', 'tipos_receita', 'pagamentos', 'auditoria', 'sincronizacao'];
         for (const k of keys) {
           if (Array.isArray(batch[k])) {
-            this.data[k as keyof typeof this.data] = batch[k] as any;
+            this.data[k as keyof typeof this.data] = omitCredentialFields(batch[k]) as any;
             this.saveToLocalStorage(k);
             this.notify(k);
           }
@@ -129,7 +196,7 @@ class PostgresSyncEngine {
         }
       }
     } catch (error) {
-      // Silent error to prevent UI noise in dev log
+      console.warn('Failed to synchronize application data:', error);
     }
   }
 
@@ -159,20 +226,31 @@ class PostgresSyncEngine {
     const newDoc = {
       id,
       ...doc,
-      dataCriacao: doc.dataCriacao || new Date().toISOString()
+      dataCriacao: doc.dataCriacao || new Date().toISOString(),
+      ...(collection === 'contribuintes' ? {
+        dataRegistro: new Date().toISOString(),
+        agenteId: '',
+      } : {}),
     };
 
+    const safeDoc = omitCredentialFields(newDoc);
     if (Array.isArray(this.data[collection])) {
-      (this.data[collection] as any[]).unshift(newDoc);
+      (this.data[collection] as any[]).unshift(safeDoc);
+      if (collection === 'contribuintes') {
+        this.data.contribuintes = this.data.contribuintes
+          .sort((a, b) => (Date.parse(b.dataRegistro || '') || 0) - (Date.parse(a.dataRegistro || '') || 0))
+          .slice(0, 50)
+          .sort((a, b) => a.nome.localeCompare(b.nome, 'pt', { sensitivity: 'base' }));
+      }
     } else {
-      this.data[collection] = newDoc;
+      this.data[collection] = safeDoc;
     }
     this.saveToLocalStorage(collection);
     this.notify(collection);
 
     // Persist to Postgres database asynchronously
     const path = collection === 'tipos_receita' ? 'tipos_receita' : collection;
-    fetch(`/api/${path}`, {
+    apiFetch(`/api/${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(newDoc)
@@ -190,11 +268,11 @@ class PostgresSyncEngine {
       const arr = this.data[collection] as any[];
       const idx = arr.findIndex(item => item.id === id);
       if (idx !== -1) {
-        arr[idx] = { ...arr[idx], ...updates, dataAtualizacao: new Date().toISOString() };
+        arr[idx] = omitCredentialFields({ ...arr[idx], ...updates, dataAtualizacao: new Date().toISOString() });
         updatedDoc = arr[idx];
       }
     } else if (collection === 'configuracoes') {
-      this.data.configuracoes = { ...this.data.configuracoes, ...updates };
+      this.data.configuracoes = omitCredentialFields({ ...this.data.configuracoes, ...updates });
       updatedDoc = this.data.configuracoes;
     }
 
@@ -204,7 +282,7 @@ class PostgresSyncEngine {
 
       const path = collection === 'tipos_receita' ? 'tipos_receita' : collection;
       const url = collection === 'configuracoes' ? `/api/configuracoes` : `/api/${path}/${id}`;
-      fetch(url, {
+      apiFetch(url, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updates)
@@ -234,7 +312,7 @@ class PostgresSyncEngine {
         this.notify(collection);
 
         const path = collection === 'tipos_receita' ? 'tipos_receita' : collection;
-        fetch(`/api/${path}/${id}`, {
+        apiFetch(`/api/${path}/${id}`, {
           method: 'DELETE'
         }).catch(err => console.warn('Failed to sync delete with Postgres:', err));
       }
@@ -261,7 +339,7 @@ class PostgresSyncEngine {
       this.saveToLocalStorage('pagamentos');
       this.notify('pagamentos');
       try {
-        await fetch('/api/pagamentos/all', { method: 'DELETE' });
+        await apiFetch('/api/pagamentos/all', { method: 'DELETE' });
       } catch (err) {
         console.warn('Failed to delete pagamentos:', err);
       }
@@ -274,7 +352,7 @@ class PostgresSyncEngine {
       this.saveToLocalStorage('agentes');
       this.notify('agentes');
       try {
-        await fetch('/api/agentes/all', { method: 'DELETE' });
+        await apiFetch('/api/agentes/all', { method: 'DELETE' });
       } catch (err) {
         console.warn('Failed to delete agentes:', err);
       }
@@ -287,7 +365,7 @@ class PostgresSyncEngine {
       this.saveToLocalStorage('contribuintes');
       this.notify('contribuintes');
       try {
-        await fetch('/api/contribuintes/all', { method: 'DELETE' });
+        await apiFetch('/api/contribuintes/all', { method: 'DELETE' });
       } catch (err) {
         console.warn('Failed to delete contribuintes:', err);
       }
@@ -300,7 +378,7 @@ class PostgresSyncEngine {
       this.saveToLocalStorage('mercados');
       this.notify('mercados');
       try {
-        await fetch('/api/mercados/all', { method: 'DELETE' });
+        await apiFetch('/api/mercados/all', { method: 'DELETE' });
       } catch (err) {
         console.warn('Failed to delete mercados:', err);
       }
@@ -313,7 +391,7 @@ class PostgresSyncEngine {
       this.saveToLocalStorage('municipios');
       this.notify('municipios');
       try {
-        await fetch('/api/municipios/all', { method: 'DELETE' });
+        await apiFetch('/api/municipios/all', { method: 'DELETE' });
       } catch (err) {
         console.warn('Failed to delete municipios:', err);
       }
@@ -326,7 +404,7 @@ class PostgresSyncEngine {
       this.saveToLocalStorage('tipos_receita');
       this.notify('tipos_receita');
       try {
-        await fetch('/api/tipos_receita/all', { method: 'DELETE' });
+        await apiFetch('/api/tipos_receita/all', { method: 'DELETE' });
       } catch (err) {
         console.warn('Failed to delete tipos_receita:', err);
       }
@@ -339,7 +417,7 @@ class PostgresSyncEngine {
       this.saveToLocalStorage('auditoria');
       this.notify('auditoria');
       try {
-        await fetch('/api/auditoria/all', { method: 'DELETE' });
+        await apiFetch('/api/auditoria/all', { method: 'DELETE' });
       } catch (err) {
         console.warn('Failed to delete auditoria:', err);
       }
@@ -365,7 +443,7 @@ class PostgresSyncEngine {
       this.notify('auditoria');
 
       try {
-        await fetch('/api/reset-all', { method: 'DELETE' });
+        await apiFetch('/api/reset-all', { method: 'DELETE' });
       } catch (err) {
         console.warn('Failed to reset all database data:', err);
       }
@@ -381,7 +459,7 @@ class PostgresSyncEngine {
     this.notify('pagamentos');
 
     try {
-      await fetch('/api/pagamentos/all', { method: 'DELETE' });
+      await apiFetch('/api/pagamentos/all', { method: 'DELETE' });
     } catch (err) {
       console.warn('Failed to sync delete all pagamentos with database:', err);
     }
@@ -408,7 +486,7 @@ class PostgresSyncEngine {
   }> {
     const startTime = Date.now();
     try {
-      const res = await fetch('/api/connection-status');
+      const res = await apiFetch('/api/connection-status');
       if (res.ok) {
         return await res.json();
       }
@@ -454,7 +532,7 @@ class PostgresSyncEngine {
     this.saveToLocalStorage('auditoria');
     this.notify('auditoria');
 
-    fetch('/api/auditoria', {
+    apiFetch('/api/auditoria', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(log)
