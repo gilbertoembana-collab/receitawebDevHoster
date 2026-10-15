@@ -2,7 +2,7 @@ import React from 'react';
 import { HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useAppStore } from './store';
 import { getCustomTheme } from './theme';
-import { ThemeProvider, CssBaseline } from '@mui/material';
+import { ThemeProvider, CssBaseline, Box, CircularProgress } from '@mui/material';
 
 // Layout
 import AdminLayout from './layouts/AdminLayout';
@@ -30,7 +30,7 @@ const SESSION_CHECK_INTERVAL_MS = 15 * 1000;
 const SESSION_CHANNEL_NAME = 'receita360-session';
 
 export default function App() {
-  const { darkMode, currentUser, setCurrentUser } = useAppStore();
+  const { darkMode, currentUser, authInitialized, setCurrentUser } = useAppStore();
   const theme = React.useMemo(() => getCustomTheme(darkMode), [darkMode]);
 
   React.useEffect(() => {
@@ -101,6 +101,17 @@ export default function App() {
       channel?.close();
     };
   }, [currentUser?.id, setCurrentUser]);
+
+  if (!authInitialized) {
+    return (
+      <ThemeProvider theme={theme}>
+        <CssBaseline />
+        <Box sx={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }} aria-label="A verificar sessão">
+          <CircularProgress />
+        </Box>
+      </ThemeProvider>
+    );
+  }
 
   if (!currentUser) {
     return (

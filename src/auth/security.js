@@ -6,6 +6,8 @@ import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 const ACCESS_TTL_SECONDS = 15 * 60;
 const REFRESH_TTL_SECONDS = 30 * 24 * 60 * 60;
 const REFRESH_COOKIE = 'receita360_refresh';
+const REFRESH_COOKIE_PATH = '/api';
+const LEGACY_REFRESH_COOKIE_PATHS = ['/api/auth', '/api/v1/auth'];
 const ISSUER = 'receita360-api';
 const AUDIENCE = 'receita360-clients';
 const ARGON_OPTIONS = {
@@ -163,20 +165,30 @@ export function createAuthSecurity(pool) {
   });
 
   function clearRefreshCookie(res) {
-    res.clearCookie(REFRESH_COOKIE, {
-      httpOnly: true,
-      secure: production,
-      sameSite: 'strict',
-      path: '/api/auth',
-    });
+    for (const cookiePath of [REFRESH_COOKIE_PATH, ...LEGACY_REFRESH_COOKIE_PATHS]) {
+      res.clearCookie(REFRESH_COOKIE, {
+        httpOnly: true,
+        secure: production,
+        sameSite: 'strict',
+        path: cookiePath,
+      });
+    }
   }
 
   function setRefreshCookie(res, token) {
+    for (const cookiePath of LEGACY_REFRESH_COOKIE_PATHS) {
+      res.clearCookie(REFRESH_COOKIE, {
+        httpOnly: true,
+        secure: production,
+        sameSite: 'strict',
+        path: cookiePath,
+      });
+    }
     res.cookie(REFRESH_COOKIE, token, {
       httpOnly: true,
       secure: production,
       sameSite: 'strict',
-      path: '/api/auth',
+      path: REFRESH_COOKIE_PATH,
       maxAge: REFRESH_TTL_SECONDS * 1000,
     });
   }
@@ -382,10 +394,23 @@ export function createAuthSecurity(pool) {
     const path = req.path;
 
     if (path === '/api/auth/logout' || path === '/api/auth/change-password') return next();
-    if (path === '/api/admin/backup' && (
-      method !== 'GET' || !PLATFORM_ROLES.has(role)
-    )) {
+    if (
+      (path === '/api/admin/backup' && method !== 'GET')
+      || (path === '/api/admin/restore' && method !== 'POST')
+      || (path.startsWith('/api/admin/restore/status/') && method !== 'GET')
+      || (path.startsWith('/api/admin/restore-safety/') && method !== 'GET')
+    ) {
       return res.status(403).json({ error: 'Ação não autorizada.' });
+    }
+    if (
+      path === '/api/admin/backup'
+      || path === '/api/admin/restore'
+      || path.startsWith('/api/admin/restore/status/')
+      || path.startsWith('/api/admin/restore-safety/')
+    ) {
+      if (!PLATFORM_ROLES.has(role)) {
+        return res.status(403).json({ error: 'Ação não autorizada.' });
+      }
     }
     if (
       path.startsWith('/api/categoria_contribuintes')
@@ -516,7 +541,6 @@ export function createAuthSecurity(pool) {
     const mobile = isMobileClient(req);
     const token = mobile ? req.body?.refreshToken : cookieValue(req, REFRESH_COOKIE);
     if (typeof token !== 'string' || token.length < 40 || token.length > 256) {
-      clearRefreshCookie(res);
       return res.status(401).json({ error: 'Sessão inválida ou expirada.' });
     }
 

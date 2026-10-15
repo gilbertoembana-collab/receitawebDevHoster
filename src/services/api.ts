@@ -21,6 +21,15 @@ async function refreshAccessToken(): Promise<string | null> {
       headers: { 'Content-Type': 'application/json', 'X-Client-Type': 'web' },
       body: '{}',
     })
+      .then((response) => {
+        if (response.status !== 401) return response;
+        return fetch('/api/auth/refresh', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json', 'X-Client-Type': 'web' },
+          body: '{}',
+        });
+      })
       .then(async (response) => {
         if (!response.ok) return null;
         const data = await response.json();

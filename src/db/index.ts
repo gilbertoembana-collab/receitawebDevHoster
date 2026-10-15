@@ -1,6 +1,7 @@
 import { drizzle } from 'drizzle-orm/node-postgres';
 import pkg from 'pg';
 import dotenv from 'dotenv';
+import { resolvePostgresSsl } from './postgres-ssl.js';
 const { Pool } = pkg;
 import * as schema from './schema.ts';
 
@@ -37,13 +38,12 @@ export const createPool = () => {
     if (!Number.isInteger(poolMax) || poolMax < 1 || poolMax > 20) {
       throw new Error('DB_POOL_MAX must be an integer between 1 and 20.');
     }
-    const isLocalDatabase = ['localhost', '127.0.0.1', '::1'].includes(parsedUrl.hostname);
-    if (isLocalDatabase && process.env.NODE_ENV !== 'production') {
-      parsedUrl.searchParams.set('sslmode', 'disable');
-    }
-    const isSslRequired = parsedUrl.searchParams.get('sslmode') === 'require'
-      || parsedUrl.hostname.includes('supabase')
-      || (process.env.NODE_ENV === 'production' && !isLocalDatabase);
+    const { mode: sslMode, required: isSslRequired } = resolvePostgresSsl(
+      parsedUrl.hostname,
+      parsedUrl.searchParams.get('sslmode'),
+      process.env.NODE_ENV,
+    );
+    parsedUrl.searchParams.set('sslmode', sslMode);
     global._postgresPool = new Pool({
       connectionString: parsedUrl.toString(),
       max: poolMax,

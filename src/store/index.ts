@@ -19,10 +19,12 @@ interface NotificationItem {
 interface AppStore {
   // Authentication & Profile State
   currentUser: Usuario | null;
+  authInitialized: boolean;
   activeProfile: UserProfile;
   availableUsers: Usuario[];
   setProfile: (profile: UserProfile) => void;
   setCurrentUser: (user: Usuario | null) => void;
+  setAuthInitialized: (initialized: boolean) => void;
 
   // Real-time collections
   usuarios: Usuario[];
@@ -149,7 +151,8 @@ export const useAppStore = create<AppStore>((set, get) => {
         const data = await response.json();
         if (data.user) get().setCurrentUser(data.user);
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => get().setAuthInitialized(true));
   }, 0);
 
   // Handle live collection simulator events
@@ -170,11 +173,12 @@ export const useAppStore = create<AppStore>((set, get) => {
   return {
     // Auth - Start with no user logged in so the login screen is requested upon opening
     currentUser: null,
+    authInitialized: false,
     activeProfile: 'Platform Owner',
     availableUsers: INITIAL_USUARIOS,
     setProfile: (profile) => {
       const u = INITIAL_USUARIOS.find(user => user.perfil === profile) || null;
-      set({ activeProfile: profile, currentUser: u });
+      set({ activeProfile: profile, currentUser: u, authInitialized: true });
       dbService.addAuditLog('login', `Troca de perfil administrativo para: ${profile}`, u?.email || 'sistema@receita360.gw');
       dbService.setTenantContext(u?.municipioId || '', profile);
     },
@@ -182,12 +186,13 @@ export const useAppStore = create<AppStore>((set, get) => {
       if (!user) {
         void logoutSession();
         dbService.clearTenantContext();
-        set({ currentUser: null, activeProfile: 'Super Admin' });
+        set({ currentUser: null, activeProfile: 'Super Admin', authInitialized: true });
         return;
       }
-      set({ currentUser: user, activeProfile: user ? user.perfil : 'Super Admin' });
+      set({ currentUser: user, activeProfile: user.perfil, authInitialized: true });
       dbService.setTenantContext(user.municipioId || '', user.perfil);
     },
+    setAuthInitialized: (initialized) => set({ authInitialized: initialized }),
 
     // Preload items initially to prevent empty tables before updates or snapshots
     usuarios: dbService.SimulatorState.usuarios || [],

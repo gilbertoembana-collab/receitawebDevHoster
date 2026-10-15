@@ -9,15 +9,31 @@ import {
   Users, ShoppingBag, Landmark, Coins, Receipt, AlertTriangle, 
   RefreshCw, Layers, FileSpreadsheet, Smartphone, Key, Wifi, 
   QrCode, Lock, Unlock, PlusCircle, RotateCw, Printer, BatteryCharging, 
-  CheckCircle2, ShieldCheck, Target
+  CheckCircle2, ShieldCheck, Target, Upload
 } from 'lucide-react';
 import { 
   Box, Typography, Card, CardContent, TextField, Button, Switch, Alert,
   FormControl, Select, MenuItem, InputLabel, FormControlLabel, Divider, Chip,
   Dialog, DialogTitle, DialogContent, DialogActions, Paper,
   Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
-  Tooltip, IconButton, LinearProgress
+  Tooltip, IconButton, LinearProgress, CircularProgress
 } from '@mui/material';
+
+const RESTORE_STEPS = [
+  'A receber e validar o ficheiro',
+  'A verificar a ligação, a base de dados e as permissões',
+  'A verificar a estrutura do backup',
+  'A criar o backup de segurança dos dados atuais',
+  'A aplicar o backup na base de dados',
+];
+const RESTORE_FAILED_STEP_INDEX: Record<string, number> = {
+  'Validação do ficheiro': 0,
+  'Verificação da base de dados': 1,
+  'Validação da estrutura do backup': 2,
+  'Criação do backup de segurança': 3,
+  'Aplicação do backup': 4,
+  Finalização: 4,
+};
 
 export default function Configuracoes() {
   const { 
@@ -51,6 +67,16 @@ export default function Configuracoes() {
   const [dispositivos, setDispositivos] = useState<Dispositivo[]>(configuracoes.dispositivos || []);
   const [isBackingUp, setIsBackingUp] = useState(false);
   const [backupMessage, setBackupMessage] = useState('');
+  const [safetyBackupId, setSafetyBackupId] = useState('');
+  const [restoreDialogOpen, setRestoreDialogOpen] = useState(false);
+  const [restoreFile, setRestoreFile] = useState<File | null>(null);
+  const [restoreConfirmation, setRestoreConfirmation] = useState('');
+  const [isRestoring, setIsRestoring] = useState(false);
+  const [restoreMessage, setRestoreMessage] = useState('');
+  const [restoreStages, setRestoreStages] = useState<string[]>([]);
+  const [restoreCompletedStages, setRestoreCompletedStages] = useState<string[]>([]);
+  const [restoreStatusWarning, setRestoreStatusWarning] = useState('');
+  const [restoreFailedStage, setRestoreFailedStage] = useState('');
   const [securityMessage, setSecurityMessage] = useState('');
 
   // Modal State for New Device Registration
@@ -456,6 +482,103 @@ export default function Configuracoes() {
     }
   };
 
+  const handleRestoreBackup = async () => {
+    if (!restoreFile || restoreConfirmation !== 'RESTAURAR') return;
+    const operationId = crypto.randomUUID();
+    setIsRestoring(true);
+    setRestoreMessage('A iniciar verificação do ficheiro...');
+    setRestoreStages([]);
+    setRestoreCompletedStages([]);
+    setRestoreStatusWarning('');
+    setRestoreFailedStage('');
+    const statusInterval = window.setInterval(async () => {
+      try {
+        const statusResponse = await apiFetch(`/api/admin/restore/status/${operationId}`);
+        if (!statusResponse.ok) {
+          throw new Error(`HTTP ${statusResponse.status}`);
+        }
+        const status = await statusResponse.json();
+        if (typeof status.stage === 'string') setRestoreMessage(status.stage);
+        if (Array.isArray(status.completedStages)) setRestoreCompletedStages(status.completedStages);
+        if (typeof status.error === 'string') setRestoreStatusWarning(status.error);
+      } catch (error) {
+        setRestoreStatusWarning(
+          error instanceof Error ? `Não foi possível consultar o progresso: ${error.message}` : 'Não foi possível consultar o progresso.',
+        );
+      }
+    }, 800);
+    try {
+      const response = await apiFetch('/api/admin/restore', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'X-Backup-Filename': restoreFile.name,
+          'X-Restore-Operation-Id': operationId,
+        },
+        body: restoreFile,
+      });
+      const result = await response.json().catch(() => null);
+      if (typeof result?.safetyBackupId === 'string') setSafetyBackupId(result.safetyBackupId);
+      if (Array.isArray(result?.stages)) setRestoreStages(result.stages);
+      if (Array.isArray(result?.completedStages)) setRestoreCompletedStages(result.completedStages);
+      if (!response.ok) {
+        if (typeof result?.stage === 'string') setRestoreFailedStage(result.stage);
+        const errorMessage = typeof result?.error === 'string' ? result.error : 'Não foi possível restaurar a cópia.';
+        throw new Error(errorMessage);
+      }
+
+      setRestoreMessage(result.message || 'Restauro concluído.');
+      setRestoreCompletedStages(Array.isArray(result.stages) ? result.stages : []);
+      setBackupMessage('Restauro concluído. Descarregue e guarde o backup de segurança.');
+      setRestoreDialogOpen(false);
+      setRestoreFile(null);
+      setRestoreConfirmation('');
+      addNotification({
+        title: 'Restauro Concluído',
+        message: 'A base de dados foi restaurada. Foi criado um backup de segurança anterior ao restauro.',
+        type: 'success',
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Não foi possível restaurar a cópia.';
+      setRestoreMessage(`Falha no restauro — ${errorMessage}`);
+      addNotification({
+        title: 'Falha no Restauro',
+        message: errorMessage,
+        type: 'warning',
+      });
+    } finally {
+      window.clearInterval(statusInterval);
+      setIsRestoring(false);
+    }
+  };
+
+  const handleDownloadSafetyBackup = async () => {
+    if (!safetyBackupId) return;
+    try {
+      const response = await apiFetch(`/api/admin/restore-safety/${safetyBackupId}`);
+      if (!response.ok) {
+        const result = await response.json().catch(() => null);
+        throw new Error(typeof result?.error === 'string' ? result.error : 'Não foi possível descarregar o backup de segurança.');
+      }
+      const backup = await response.blob();
+      if (!backup.size) throw new Error('O servidor devolveu um backup de segurança vazio.');
+      const objectUrl = URL.createObjectURL(backup);
+      const downloadLink = document.createElement('a');
+      downloadLink.href = objectUrl;
+      downloadLink.download = `receita360-pre-restauro-${safetyBackupId}.dump`;
+      document.body.appendChild(downloadLink);
+      downloadLink.click();
+      downloadLink.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    } catch (error) {
+      addNotification({
+        title: 'Falha no Download',
+        message: error instanceof Error ? error.message : 'Não foi possível descarregar o backup de segurança.',
+        type: 'warning',
+      });
+    }
+  };
+
   if (!isOwner) {
     return (
       <Box sx={{ py: 2 }}>
@@ -689,7 +812,7 @@ export default function Configuracoes() {
 
               <div className="space-y-4">
                 <Alert severity="info">
-                  O sistema usa PostgreSQL. O backup manual descarrega um ficheiro completo da base de dados. O backup automático ainda não está agendado no servidor; configure uma tarefa agendada no alojamento.
+                  O sistema usa PostgreSQL. O backup manual descarrega um ficheiro completo. Pode restaurar um dump SQL: os dados atuais serão substituídos e será criado um backup de segurança antes da operação. O backup automático ainda não está agendado no servidor.
                 </Alert>
 
                 <Divider />
@@ -724,6 +847,18 @@ export default function Configuracoes() {
                     >
                       {isBackingUp ? 'A gerar backup...' : 'Descarregar Backup PostgreSQL'}
                     </Button>
+                    <Button
+                      variant="outlined"
+                      startIcon={<Upload size={15} />}
+                      onClick={() => {
+                        setRestoreMessage('');
+                        setRestoreDialogOpen(true);
+                      }}
+                      disabled={isBackingUp || isRestoring}
+                      id="btn-open-restore-backup"
+                    >
+                      Restaurar ficheiro dump.sql
+                    </Button>
                     {backupMessage && (
                       <Typography
                         variant="caption"
@@ -732,6 +867,16 @@ export default function Configuracoes() {
                       >
                         {backupMessage}
                       </Typography>
+                    )}
+                    {safetyBackupId && (
+                      <Button
+                        size="small"
+                        variant="text"
+                        onClick={handleDownloadSafetyBackup}
+                        id="btn-download-restore-safety-backup"
+                      >
+                        Descarregar backup de segurança
+                      </Button>
                     )}
                   </Box>
                   <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 1 }}>
@@ -1616,6 +1761,125 @@ export default function Configuracoes() {
         <DialogActions sx={{ p: 2 }}>
           <Button onClick={() => setOpenQrModal(false)} color="primary" variant="contained" fullWidth sx={{ textTransform: 'none', fontWeight: 700 }}>
             Concluído
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={restoreDialogOpen}
+        onClose={() => {
+          if (!isRestoring) setRestoreDialogOpen(false);
+        }}
+        maxWidth="sm"
+        fullWidth
+        id="dialog-restore-backup"
+      >
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1, color: 'error.main' }}>
+          <AlertTriangle size={22} />
+          Restaurar cópia de segurança SQL
+        </DialogTitle>
+        <DialogContent dividers>
+          <Alert severity="warning" sx={{ mb: 2 }}>
+            Esta operação substitui os dados atuais da base de dados. Antes de restaurar, o sistema criará um backup PostgreSQL de segurança, que poderá descarregar no final.
+          </Alert>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            Selecione um dump SQL em texto (.sql) ou o backup PostgreSQL descarregado pela aplicação (.dump), com tamanho máximo de 1 GiB. O ficheiro será aplicado numa única transação; se ocorrer um erro, a operação será revertida.
+          </Typography>
+          <Button
+            component="label"
+            variant="outlined"
+            startIcon={<Upload size={16} />}
+            disabled={isRestoring}
+            sx={{ mb: 2 }}
+          >
+            {restoreFile ? restoreFile.name : 'Selecionar ficheiro .sql ou .dump'}
+            <input
+              hidden
+              type="file"
+              accept=".sql,.dump,text/plain,application/sql,application/vnd.postgresql.custom"
+              onChange={(event) => {
+                const file = event.target.files?.[0] || null;
+                const supportedFile = file && /\.(sql|dump)$/i.test(file.name);
+                setRestoreFile(supportedFile ? file : null);
+                setRestoreMessage(file && !supportedFile
+                  ? 'Selecione um ficheiro com extensão .sql ou .dump.'
+                  : '');
+                event.target.value = '';
+              }}
+            />
+          </Button>
+          {restoreMessage && (
+            <Alert
+              severity={restoreMessage.startsWith('Falha') ? 'error' : restoreMessage.startsWith('Restauro concluído') ? 'success' : 'info'}
+              sx={{ mb: 2 }}
+            >
+              {restoreMessage}
+              {restoreStages.length > 0 && (
+                <Box component="ul" sx={{ mt: 1, mb: 0, pl: 2.5 }}>
+                  {restoreStages.map((stage, index) => (
+                    <li key={`${index}-${stage}`}>{stage}</li>
+                  ))}
+                </Box>
+              )}
+            </Alert>
+          )}
+          {(isRestoring || restoreFailedStage || restoreCompletedStages.length > 0) && (
+            <Box component="ol" aria-label="Etapas da restauração" sx={{ listStyle: 'none', p: 0, mb: 2 }}>
+              {RESTORE_STEPS.map((step) => {
+                const failed = RESTORE_FAILED_STEP_INDEX[restoreFailedStage] === RESTORE_STEPS.indexOf(step);
+                const completed = restoreCompletedStages.includes(step);
+                const active = isRestoring && restoreMessage === step;
+                return (
+                  <Box component="li" key={step} sx={{ display: 'flex', alignItems: 'center', gap: 1, py: 0.5 }}>
+                    {completed
+                      ? <CheckCircle2 size={16} color="#16a34a" />
+                      : active
+                        ? <CircularProgress size={15} />
+                        : failed
+                          ? <AlertTriangle size={16} color="#dc2626" />
+                          : <span style={{ width: 16 }} />}
+                    <Typography
+                      variant="body2"
+                      color={failed ? 'error.main' : completed ? 'success.main' : active ? 'text.primary' : 'text.secondary'}
+                    >
+                      {step}
+                      {failed ? ` — falhou${restoreFailedStage ? ` (${restoreFailedStage})` : ''}` : ''}
+                    </Typography>
+                  </Box>
+                );
+              })}
+            </Box>
+          )}
+          {restoreStatusWarning && (
+            <Alert severity="warning" sx={{ mb: 2 }}>{restoreStatusWarning}</Alert>
+          )}
+          <TextField
+            fullWidth
+            size="small"
+            label={'Digite RESTAURAR para confirmar'}
+            value={restoreConfirmation}
+            onChange={(event) => setRestoreConfirmation(event.target.value)}
+            disabled={isRestoring}
+            autoComplete="off"
+          />
+        </DialogContent>
+        <DialogActions sx={{ p: 2 }}>
+          <Button
+            onClick={() => setRestoreDialogOpen(false)}
+            color="inherit"
+            disabled={isRestoring}
+          >
+            Cancelar
+          </Button>
+          <Button
+            variant="contained"
+            color="error"
+            onClick={handleRestoreBackup}
+            disabled={isRestoring || !restoreFile || restoreConfirmation !== 'RESTAURAR'}
+            startIcon={isRestoring ? <CircularProgress size={16} color="inherit" /> : <Upload size={16} />}
+            id="btn-confirm-restore-backup"
+          >
+            {isRestoring ? 'A restaurar...' : 'Substituir dados e restaurar'}
           </Button>
         </DialogActions>
       </Dialog>

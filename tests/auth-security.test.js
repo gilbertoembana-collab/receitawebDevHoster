@@ -340,6 +340,64 @@ test('database backups are restricted to platform administrators and GET request
   assert.equal(platformNextCalled, true);
 });
 
+test('database restore and safety downloads are restricted to platform administrators', () => {
+  process.env.JWT_ACCESS_SECRET = 'test-access-secret-that-is-at-least-32-bytes';
+  process.env.JWT_REFRESH_SECRET = 'test-refresh-secret-that-is-at-least-32-bytes';
+  const security = createAuthSecurity({ query: async () => ({ rows: [] }) });
+
+  const municipalResponse = makeResponse();
+  let municipalNextCalled = false;
+  security.authorizeApi({
+    path: '/api/admin/restore',
+    method: 'POST',
+    auth: { role: 'Administrador Municipal', kind: 'user' },
+  }, municipalResponse, () => { municipalNextCalled = true; });
+  assert.equal(municipalResponse.statusCode, 403);
+  assert.equal(municipalNextCalled, false);
+
+  const wrongMethodResponse = makeResponse();
+  let wrongMethodNextCalled = false;
+  security.authorizeApi({
+    path: '/api/admin/restore',
+    method: 'GET',
+    auth: { role: 'Platform Owner', kind: 'user' },
+  }, wrongMethodResponse, () => { wrongMethodNextCalled = true; });
+  assert.equal(wrongMethodResponse.statusCode, 403);
+  assert.equal(wrongMethodNextCalled, false);
+
+  let restoreNextCalled = false;
+  security.authorizeApi({
+    path: '/api/admin/restore',
+    method: 'POST',
+    auth: { role: 'Platform Owner', kind: 'user' },
+  }, makeResponse(), () => { restoreNextCalled = true; });
+  assert.equal(restoreNextCalled, true);
+
+  let safetyDownloadNextCalled = false;
+  security.authorizeApi({
+    path: '/api/admin/restore-safety/00000000-0000-4000-8000-000000000000',
+    method: 'GET',
+    auth: { role: 'Platform Owner', kind: 'user' },
+  }, makeResponse(), () => { safetyDownloadNextCalled = true; });
+  assert.equal(safetyDownloadNextCalled, true);
+
+  const municipalStatusResponse = makeResponse();
+  security.authorizeApi({
+    path: '/api/admin/restore/status/00000000-0000-4000-8000-000000000000',
+    method: 'GET',
+    auth: { role: 'Administrador Municipal', kind: 'user' },
+  }, municipalStatusResponse, () => assert.fail('Municipal administrators must not inspect restore status.'));
+  assert.equal(municipalStatusResponse.statusCode, 403);
+
+  let platformStatusNextCalled = false;
+  security.authorizeApi({
+    path: '/api/admin/restore/status/00000000-0000-4000-8000-000000000000',
+    method: 'GET',
+    auth: { role: 'Platform Owner', kind: 'user' },
+  }, makeResponse(), () => { platformStatusNextCalled = true; });
+  assert.equal(platformStatusNextCalled, true);
+});
+
 test('agents can change only contributor status within their municipality', async () => {
   process.env.JWT_ACCESS_SECRET = 'test-access-secret-that-is-at-least-32-bytes';
   process.env.JWT_REFRESH_SECRET = 'test-refresh-secret-that-is-at-least-32-bytes';
@@ -427,4 +485,103 @@ test('refresh rotation detects replay and logout revokes the refresh session', a
   const revokedResponse = makeResponse();
   await security.refresh(requestFor(logoutToken), revokedResponse);
   assert.equal(revokedResponse.statusCode, 401);
+});
+
+test('web refresh cookie is available to versioned auth endpoints after reload', async (t) => {
+  process.env.JWT_ACCESS_SECRET = 'test-access-secret-that-is-at-least-32-bytes';
+  process.env.JWT_REFRESH_SECRET = 'test-refresh-secret-that-is-at-least-32-bytes';
+  process.env.NODE_ENV = 'test';
+  const security = createAuthSecurity(makeSessionPool());
+  const principal = {
+    id: 'user-test',
+    email: 'test@example.invalid',
+    role: 'Supervisor Municipal',
+    perfil: 'Supervisor Municipal',
+    municipalityId: 'municipality-test',
+    municipioId: 'municipality-test',
+    kind: 'user',
+  };
+  const app = express();
+  app.use(express.json());
+  app.use(security.normalizeApiVersion);
+  app.use(security.cors);
+  app.use(security.authenticateApi);
+  app.use(security.authorizeApi);
+  app.post('/api/auth/login', (req, res) => security.issueSession(req, res, principal));
+  app.post('/api/auth/refresh', security.authRateLimit, security.refresh);
+  const server = app.listen(0);
+  await new Promise((resolve) => server.once('listening', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+
+  const login = await fetch(`${baseUrl}/api/v1/auth/login`, {
+    method: 'POST',
+    headers: { 'x-client-type': 'web' },
+  });
+  assert.equal(login.status, 200);
+  const initialCookies = login.headers.getSetCookie();
+  const initialCookie = initialCookies.find((cookie) => /Path=\/api(?:;|$)/i.test(cookie));
+  assert.ok(initialCookie);
+  assert.ok(initialCookies.some((cookie) => /Path=\/api\/auth/i.test(cookie)));
+  assert.ok(initialCookies.some((cookie) => /Path=\/api\/v1\/auth/i.test(cookie)));
+
+  const refresh = await fetch(`${baseUrl}/api/v1/auth/refresh`, {
+    method: 'POST',
+    headers: {
+      'x-client-type': 'web',
+      cookie: initialCookie.split(';', 1)[0],
+    },
+  });
+  assert.equal(refresh.status, 200);
+  assert.ok(refresh.headers.getSetCookie().some((cookie) => /Path=\/api(?:;|$)/i.test(cookie)));
+});
+
+test('missing versioned refresh cookie does not clear legacy cookie before fallback', async (t) => {
+  process.env.JWT_ACCESS_SECRET = 'test-access-secret-that-is-at-least-32-bytes';
+  process.env.JWT_REFRESH_SECRET = 'test-refresh-secret-that-is-at-least-32-bytes';
+  process.env.NODE_ENV = 'test';
+  const security = createAuthSecurity(makeSessionPool());
+  const principal = {
+    id: 'user-test',
+    email: 'test@example.invalid',
+    role: 'Supervisor Municipal',
+    perfil: 'Supervisor Municipal',
+    municipalityId: 'municipality-test',
+    municipioId: 'municipality-test',
+    kind: 'user',
+  };
+  const app = express();
+  app.use(express.json());
+  app.use(security.normalizeApiVersion);
+  app.use(security.cors);
+  app.use(security.authenticateApi);
+  app.use(security.authorizeApi);
+  app.post('/api/auth/login', (req, res) => security.issueSession(req, res, principal));
+  app.post('/api/auth/refresh', security.authRateLimit, security.refresh);
+  const server = app.listen(0);
+  await new Promise((resolve) => server.once('listening', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+
+  const login = await fetch(`${baseUrl}/api/v1/auth/login`, {
+    method: 'POST',
+    headers: { 'x-client-type': 'web' },
+  });
+  const loginCookie = login.headers.getSetCookie().find((cookie) => /Path=\/api(?:;|$)/i.test(cookie));
+  assert.ok(loginCookie);
+  const cookieValue = loginCookie.split(';', 1)[0];
+
+  const noCookieRefresh = await fetch(`${baseUrl}/api/v1/auth/refresh`, {
+    method: 'POST',
+    headers: { 'x-client-type': 'web' },
+  });
+  assert.equal(noCookieRefresh.status, 401);
+  assert.deepEqual(noCookieRefresh.headers.getSetCookie(), []);
+
+  const legacyPathRefresh = await fetch(`${baseUrl}/api/auth/refresh`, {
+    method: 'POST',
+    headers: { 'x-client-type': 'web', cookie: cookieValue },
+  });
+  assert.equal(legacyPathRefresh.status, 200);
+  assert.ok(legacyPathRefresh.headers.getSetCookie().some((cookie) => /Path=\/api(?:;|$)/i.test(cookie)));
 });

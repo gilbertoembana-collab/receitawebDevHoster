@@ -1,6 +1,7 @@
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
+import os from 'node:os';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import * as dotenv from 'dotenv';
@@ -13,6 +14,8 @@ import {
 } from './src/db/schema.ts';
 import { and, asc, count, desc, eq, ilike, or, type SQL } from 'drizzle-orm';
 import { initializeDatabase } from './src/db/init.ts';
+import { resolvePostgresSsl } from './src/db/postgres-ssl.js';
+import { normalizeSqlDump } from './src/db/restore-sql.js';
 import { createAuthSecurity, hashPassword, verifyStoredPassword } from './src/auth/security.js';
 
 async function hashImportedPassword(value: unknown): Promise<string | null> {
@@ -57,6 +60,112 @@ function classifyImportedContributor(activityValue: unknown, categoryValue: unkn
       : activity ? 'Pequeno' : 'Micro';
 
   return { atividade: activity, categoria: category, dimensao };
+}
+
+const MAX_RESTORE_UPLOAD_BYTES = 1024 * 1024 * 1024;
+
+function writeRequestBodyToFile(
+  req: express.Request,
+  filePath: string,
+  maxBytes: number,
+): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const output = fs.createWriteStream(filePath, { flags: 'wx', mode: 0o600 });
+    let bytesWritten = 0;
+    let settled = false;
+
+    const cleanup = () => {
+      req.off('data', onData);
+      req.off('end', onEnd);
+      req.off('aborted', onAborted);
+      req.off('error', onRequestError);
+      output.off('drain', onDrain);
+      output.off('finish', onFinish);
+      output.off('error', onOutputError);
+    };
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) {
+        output.destroy();
+        reject(error);
+      } else {
+        resolve(bytesWritten);
+      }
+    };
+    const onData = (chunk: Buffer) => {
+      bytesWritten += chunk.length;
+      if (bytesWritten > maxBytes) {
+        const error = Object.assign(new Error('O ficheiro excede o limite de 1 GiB.'), { statusCode: 413 });
+        req.pause();
+        req.unpipe(output);
+        finish(error);
+        req.resume();
+        return;
+      }
+      if (!output.write(chunk)) req.pause();
+    };
+    const onEnd = () => output.end();
+    const onAborted = () => finish(new Error('O envio do ficheiro foi interrompido.'));
+    const onRequestError = (error: Error) => finish(error);
+    const onDrain = () => req.resume();
+    const onFinish = () => finish();
+    const onOutputError = (error: Error) => finish(error);
+
+    req.on('data', onData);
+    req.once('end', onEnd);
+    req.once('aborted', onAborted);
+    req.once('error', onRequestError);
+    output.on('drain', onDrain);
+    output.once('finish', onFinish);
+    output.once('error', onOutputError);
+    req.resume();
+  });
+}
+
+function runPostgresTool(
+  executable: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(executable, args, {
+        env,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+
+    let stdout = '';
+    let stdoutBytes = 0;
+    let stderr = '';
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > 20 * 1024 * 1024) {
+        child.kill('SIGTERM');
+        reject(new Error('A lista do ficheiro de backup excede o limite permitido.'));
+        return;
+      }
+      stdout += chunk.toString();
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr = `${stderr}${chunk.toString()}`.slice(-4000);
+    });
+    child.once('error', reject);
+    child.once('close', (code) => {
+      if (code === 0) {
+        resolve(stdout);
+      } else {
+        reject(new Error(`O utilitário PostgreSQL terminou com código ${code ?? 'desconhecido'}: ${stderr}`));
+      }
+    });
+  });
 }
 
 const LEGACY_REGISTRATION_AGENT_ID = 'agen-f7rm38ilf';
@@ -220,7 +329,17 @@ async function startServer() {
   const { createPool } = await import('./src/db/index.ts');
   const pool = createPool();
   const auth = createAuthSecurity(pool);
-  let backupInProgress = false;
+  const safetyBackupDirectory = path.resolve(
+    process.env.RECEITA360_BACKUP_DIR || path.join(os.tmpdir(), 'receita360-backups'),
+  );
+  let databaseMaintenanceStatus: {
+    operationId: string;
+    stage: string;
+    updatedAt: string;
+    completedStages: string[];
+    error?: string;
+  } | null = null;
+  let databaseMaintenanceInProgress = false;
   const reactivateExpiredContributors = async () => {
     await pool.query(
       `UPDATE contribuintes
@@ -322,8 +441,8 @@ async function startServer() {
     if (!['Platform Owner', 'Super Admin', 'Super Administrador', 'Administrator'].includes(req.auth?.role || '')) {
       return res.status(403).json({ error: 'Ação não autorizada.' });
     }
-    if (backupInProgress) {
-      return res.status(409).json({ error: 'Já existe um backup em execução.' });
+    if (databaseMaintenanceInProgress) {
+      return res.status(409).json({ error: 'Já existe uma operação de backup ou restauro em execução.' });
     }
 
     let databaseUrl: URL;
@@ -350,15 +469,11 @@ async function startServer() {
       return res.status(500).json({ error: 'A configuração do banco de dados não permite gerar o backup.' });
     }
 
-    const isLocalDatabase = ['localhost', '127.0.0.1', '::1'].includes(host);
-    const configuredSslMode = databaseUrl.searchParams.get('sslmode');
-    const sslRequired = configuredSslMode === 'require'
-      || host.includes('supabase')
-      || (process.env.NODE_ENV === 'production' && !isLocalDatabase);
-    const sslModes = new Set(['disable', 'allow', 'prefer', 'require', 'verify-ca', 'verify-full']);
-    const sslMode = configuredSslMode && sslModes.has(configuredSslMode)
-      ? configuredSslMode
-      : sslRequired ? 'require' : 'disable';
+    const { mode: sslMode } = resolvePostgresSsl(
+      host,
+      databaseUrl.searchParams.get('sslmode'),
+      process.env.NODE_ENV,
+    );
     const childEnvironment: NodeJS.ProcessEnv = {
       PATH: process.env.PATH,
       HOME: process.env.HOME,
@@ -368,7 +483,7 @@ async function startServer() {
       PGUSER: username,
       PGPASSWORD: password,
       PGDATABASE: databaseName,
-      PGSSLMODE: sslRequired && sslMode === 'disable' ? 'require' : sslMode,
+      PGSSLMODE: sslMode,
       PGAPPNAME: 'receita360-backup',
     };
     const rootCertificate = databaseUrl.searchParams.get('sslrootcert');
@@ -393,7 +508,7 @@ async function startServer() {
       }
     };
 
-    backupInProgress = true;
+    databaseMaintenanceInProgress = true;
     let child: ReturnType<typeof spawn>;
     try {
       child = spawn(
@@ -402,7 +517,7 @@ async function startServer() {
         { env: childEnvironment, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true },
       );
     } catch (error) {
-      backupInProgress = false;
+      databaseMaintenanceInProgress = false;
       console.error('Could not start PostgreSQL backup process:', error);
       return res.status(503).json({ error: 'Não foi possível iniciar o pg_dump no servidor.' });
     }
@@ -413,7 +528,7 @@ async function startServer() {
     const finishOnce = () => {
       if (finished) return false;
       finished = true;
-      backupInProgress = false;
+      databaseMaintenanceInProgress = false;
       return true;
     };
 
@@ -467,6 +582,293 @@ async function startServer() {
         res.destroy(new Error('PostgreSQL backup failed.'));
       }
     });
+  });
+
+  app.post('/api/admin/restore', async (req, res) => {
+    if (!['Platform Owner', 'Super Admin', 'Super Administrador', 'Administrator'].includes(req.auth?.role || '')) {
+      return res.status(403).json({ error: 'Ação não autorizada.' });
+    }
+    if (databaseMaintenanceInProgress) {
+      return res.status(409).json({ error: 'Já existe uma operação de backup ou restauro em execução.' });
+    }
+    const uploadedFilename = req.get('x-backup-filename') || '';
+    const operationId = req.get('x-restore-operation-id') || '';
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(operationId)) {
+      return res.status(400).json({ error: 'Identificador da operação inválido.' });
+    }
+    if (!/^[^/\\\0]{1,255}\.(?:sql|dump)$/i.test(uploadedFilename)) {
+      return res.status(400).json({ error: 'Selecione um ficheiro .sql ou .dump.' });
+    }
+    if (!['application/octet-stream', 'application/sql', 'text/plain'].includes(req.get('content-type') || '')) {
+      return res.status(415).json({ error: 'O ficheiro deve ser enviado como um dump SQL.' });
+    }
+    const contentLength = Number(req.get('content-length') || 0);
+    if (contentLength > MAX_RESTORE_UPLOAD_BYTES) {
+      return res.status(413).json({ error: 'O ficheiro excede o limite de 1 GiB.' });
+    }
+
+    databaseMaintenanceInProgress = true;
+    let operationDirectory: string | null = null;
+    let safetyBackupId: string | null = null;
+    let stage: 'upload' | 'database-check' | 'file-check' | 'safety' | 'restore' | 'complete' = 'upload';
+    const stageLabels = {
+      upload: 'A receber e validar o ficheiro',
+      'database-check': 'A verificar a ligação, a base de dados e as permissões',
+      'file-check': 'A verificar a estrutura do backup',
+      safety: 'A criar o backup de segurança dos dados atuais',
+      restore: 'A aplicar o backup na base de dados',
+      complete: 'Restauro concluído',
+    };
+    const completedStages: string[] = [];
+    const updateRestoreStage = (nextStage: typeof stage) => {
+      if (stage !== nextStage && !completedStages.includes(stageLabels[stage])) {
+        completedStages.push(stageLabels[stage]);
+      }
+      stage = nextStage;
+      databaseMaintenanceStatus = {
+        operationId,
+        stage: stageLabels[nextStage],
+        updatedAt: new Date().toISOString(),
+        completedStages: [...completedStages],
+      };
+    };
+    updateRestoreStage('upload');
+
+    try {
+      operationDirectory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'receita360-restore-'));
+      const uploadedSqlPath = path.join(operationDirectory, 'uploaded.sql');
+      const normalizedSqlPath = path.join(operationDirectory, 'restore.sql');
+      const uploadedBytes = await writeRequestBodyToFile(req, uploadedSqlPath, MAX_RESTORE_UPLOAD_BYTES);
+      if (uploadedBytes === 0) throw new Error('O ficheiro SQL está vazio.');
+      const uploadedFile = await fs.promises.open(uploadedSqlPath, 'r');
+      const signature = Buffer.alloc(5);
+      const { bytesRead } = await uploadedFile.read(signature, 0, signature.length, 0);
+      await uploadedFile.close();
+      const isCustomArchive = bytesRead === signature.length && signature.equals(Buffer.from('PGDMP'));
+      const isSqlFile = uploadedFilename.toLowerCase().endsWith('.sql');
+      if (isCustomArchive === isSqlFile) {
+        throw new Error(isSqlFile
+          ? 'O ficheiro .sql selecionado não contém um dump SQL de texto válido.'
+          : 'O ficheiro .dump selecionado não é um arquivo PostgreSQL válido.');
+      }
+      if (isSqlFile) await normalizeSqlDump(uploadedSqlPath, normalizedSqlPath);
+
+      updateRestoreStage('database-check');
+      if (!process.env.DATABASE_URL) throw new Error('A configuração do banco de dados não está disponível.');
+      const databaseUrl = new URL(process.env.DATABASE_URL);
+      if (!['postgres:', 'postgresql:'].includes(databaseUrl.protocol)) {
+        throw new Error('A configuração do banco de dados não é válida.');
+      }
+      const databaseName = decodeURIComponent(databaseUrl.pathname.replace(/^\/+/, ''));
+      const host = databaseUrl.hostname.replace(/^\[|\]$/g, '');
+      const username = decodeURIComponent(databaseUrl.username);
+      const password = decodeURIComponent(databaseUrl.password);
+      if (!databaseName || !host) throw new Error('A configuração do banco de dados não é válida.');
+
+      const { mode: sslMode } = resolvePostgresSsl(
+        host,
+        databaseUrl.searchParams.get('sslmode'),
+        process.env.NODE_ENV,
+      );
+      const childEnvironment: NodeJS.ProcessEnv = {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        LANG: process.env.LANG || 'C',
+        PGHOST: host,
+        PGPORT: databaseUrl.port || '5432',
+        PGUSER: username,
+        PGPASSWORD: password,
+        PGDATABASE: databaseName,
+        PGSSLMODE: sslMode,
+        PGAPPNAME: 'receita360-restore',
+      };
+      const rootCertificate = databaseUrl.searchParams.get('sslrootcert');
+      if (rootCertificate) childEnvironment.PGSSLROOTCERT = rootCertificate;
+
+      const databaseCheck = await pool.query(`
+        SELECT current_database() AS database_name,
+               current_user AS user_name,
+               current_setting('server_version') AS server_version,
+               has_database_privilege(current_user, current_database(), 'CONNECT') AS can_connect,
+               has_schema_privilege(current_user, 'public', 'CREATE') AS can_create_in_public,
+               (SELECT pg_get_userbyid(nspowner) = current_user
+                       OR pg_has_role(current_user, nspowner, 'MEMBER')
+                  FROM pg_namespace WHERE nspname = 'public') AS owns_public_schema,
+               (SELECT count(*)::integer FROM pg_tables WHERE schemaname = 'public') AS table_count
+      `);
+      const databaseInfo = databaseCheck.rows[0];
+      if (!databaseInfo || databaseInfo.database_name !== databaseName) {
+        throw new Error('A base de dados ligada não corresponde ao destino configurado. Nenhum dado foi alterado.');
+      }
+      if (!databaseInfo.can_connect || !databaseInfo.can_create_in_public || !databaseInfo.owns_public_schema) {
+        throw new Error(`O utilizador "${databaseInfo.user_name}" não tem permissões para substituir o schema public da base "${databaseName}". Nenhum dado foi alterado.`);
+      }
+
+      updateRestoreStage('file-check');
+      if (isCustomArchive) {
+        await runPostgresTool(
+          process.env.PG_RESTORE_PATH || 'pg_restore',
+          ['--list', uploadedSqlPath],
+          childEnvironment,
+        );
+      }
+
+      updateRestoreStage('safety');
+      await fs.promises.mkdir(safetyBackupDirectory, { recursive: true, mode: 0o700 });
+      await fs.promises.chmod(safetyBackupDirectory, 0o700);
+      safetyBackupId = randomUUID();
+      const safetyBackupPath = path.join(safetyBackupDirectory, `${safetyBackupId}.dump`);
+      await runPostgresTool(
+        process.env.PG_DUMP_PATH || 'pg_dump',
+        [
+          '--format=custom',
+          '--no-owner',
+          '--no-privileges',
+          '--no-password',
+          '--dbname',
+          databaseName,
+          '--file',
+          safetyBackupPath,
+        ],
+        childEnvironment,
+      );
+
+      updateRestoreStage('restore');
+      if (isCustomArchive) {
+        await runPostgresTool(
+          process.env.PG_RESTORE_PATH || 'pg_restore',
+          [
+            '--clean',
+            '--if-exists',
+            '--no-owner',
+            '--no-privileges',
+            '--exit-on-error',
+            '--single-transaction',
+            '--dbname',
+            databaseName,
+            uploadedSqlPath,
+          ],
+          childEnvironment,
+        );
+      } else {
+        await runPostgresTool(
+          process.env.PSQL_PATH || 'psql',
+          [
+            '--no-psqlrc',
+            '--no-password',
+            '--quiet',
+            '--single-transaction',
+            '--set=ON_ERROR_STOP=1',
+            '--dbname',
+            databaseName,
+            '--command',
+            'DROP SCHEMA public CASCADE; CREATE SCHEMA public;',
+            '--file',
+            normalizedSqlPath,
+          ],
+          childEnvironment,
+        );
+      }
+
+      try {
+        await db.insert(auditoriaLog).values({
+          id: `audit-${randomUUID()}`,
+          usuario: req.auth?.email || req.auth?.id || 'unknown',
+          perfil: req.auth?.role || 'unknown',
+          data: new Date().toISOString().slice(0, 10),
+          hora: new Date().toISOString().slice(11, 19),
+          ip: req.ip || 'unknown',
+          dispositivo: req.get('x-client-type') || 'web',
+          acao: 'restauro',
+          descricao: `Restauro PostgreSQL concluído. Backup de segurança: ${safetyBackupId}.`,
+        });
+      } catch (error) {
+        console.error('Could not record PostgreSQL restore audit event:', error);
+      }
+
+      updateRestoreStage('complete');
+      return res.json({
+        success: true,
+        message: 'Restauro concluído. Foi criada uma cópia de segurança anterior ao restauro.',
+        safetyBackupId,
+        stages: [
+          'Ficheiro recebido e validado',
+          `Base verificada: ${databaseInfo.database_name} (${databaseInfo.table_count} tabelas, PostgreSQL ${databaseInfo.server_version})`,
+          'Estrutura do backup validada',
+          'Backup de segurança criado',
+          'Dados restaurados',
+        ],
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Erro desconhecido.';
+      console.error(`PostgreSQL restore failed during ${stage}:`, message);
+      const errorStages: Record<string, string> = {
+        upload: 'Validação do ficheiro',
+        'database-check': 'Verificação da base de dados',
+        'file-check': 'Validação da estrutura do backup',
+        safety: 'Criação do backup de segurança',
+        restore: 'Aplicação do backup',
+        complete: 'Finalização',
+      };
+      const status = stage === 'upload' || stage === 'file-check' ? 400
+        : stage === 'database-check' || stage === 'safety' ? 503
+          : 500;
+      databaseMaintenanceStatus = {
+        operationId,
+        stage: `Falha: ${errorStages[stage]}`,
+        updatedAt: new Date().toISOString(),
+        completedStages: [...completedStages],
+        error: message,
+      };
+      return res.status(status).json({
+        error: `${errorStages[stage]}: ${message}`,
+        stage: errorStages[stage],
+        completedStages,
+        ...(safetyBackupId ? { safetyBackupId } : {}),
+      });
+    } finally {
+      databaseMaintenanceInProgress = false;
+      if (operationDirectory) {
+        try {
+          await fs.promises.rm(operationDirectory, { recursive: true, force: true });
+        } catch (error) {
+          console.error('Could not remove temporary PostgreSQL restore files:', error);
+        }
+      }
+    }
+  });
+
+  app.get('/api/admin/restore/status/:operationId', (req, res) => {
+    if (!['Platform Owner', 'Super Admin', 'Super Administrador', 'Administrator'].includes(req.auth?.role || '')) {
+      return res.status(403).json({ error: 'Ação não autorizada.' });
+    }
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(req.params.operationId)) {
+      return res.status(400).json({ error: 'Identificador da operação inválido.' });
+    }
+    if (databaseMaintenanceStatus?.operationId !== req.params.operationId) {
+      return res.json({ operationId: req.params.operationId, stage: 'Aguardando início da operação' });
+    }
+    return res.json(databaseMaintenanceStatus);
+  });
+
+  app.get('/api/admin/restore-safety/:id', async (req, res) => {
+    if (!['Platform Owner', 'Super Admin', 'Super Administrador', 'Administrator'].includes(req.auth?.role || '')) {
+      return res.status(403).json({ error: 'Ação não autorizada.' });
+    }
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(req.params.id)) {
+      return res.status(400).json({ error: 'Identificador do backup inválido.' });
+    }
+    const safetyBackupPath = path.join(safetyBackupDirectory, `${req.params.id}.dump`);
+    try {
+      await fs.promises.access(safetyBackupPath, fs.constants.R_OK);
+      res.setHeader('Content-Type', 'application/vnd.postgresql.custom');
+      res.setHeader('Content-Disposition', `attachment; filename="receita360-pre-restore-${req.params.id}.dump"`);
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      return fs.createReadStream(safetyBackupPath).pipe(res);
+    } catch {
+      return res.status(404).json({ error: 'O backup de segurança não foi encontrado neste servidor.' });
+    }
   });
 
   // --- API ROUTES ---

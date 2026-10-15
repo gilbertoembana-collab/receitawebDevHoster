@@ -11,12 +11,14 @@ import {
 import { 
   Box, Typography, Button, TextField, Table, TableBody, TableCell, 
   TableContainer, TableHead, TableRow, Paper, Dialog, DialogTitle, 
-  DialogContent, DialogActions, Chip, FormControl, Select, MenuItem, InputLabel,
+  DialogContent, DialogActions, Chip, FormControl, Select, MenuItem, InputLabel, FormHelperText,
   Pagination, InputAdornment, IconButton, Tooltip, Avatar
 } from '@mui/material';
 import { exportToExcel, printToPDF } from '../../utils/export';
 
 type ContributorFormStatus = 'ativo' | 'inativo-temporario' | 'inativo';
+type ContributorFormField = 'nome' | 'documento' | 'mercadoId' | 'numBanca' | 'categoria' | 'dimensao' | 'areaM2' | 'reativarEm';
+type ContributorFormErrors = Partial<Record<ContributorFormField, string>>;
 
 function escapeCardHtml(value: unknown): string {
   return String(value ?? '').replace(/[&<>"']/g, character => ({
@@ -44,6 +46,7 @@ export default function Contribuintes() {
   const [editingItem, setEditingItem] = useState<Contribuinte | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [formErrors, setFormErrors] = useState<ContributorFormErrors>({});
 
   // Dialogs for Camera Capture & QR Code Scanning
   const [openPhotoDialog, setOpenPhotoDialog] = useState(false);
@@ -134,6 +137,9 @@ export default function Contribuintes() {
   const [areaM2, setAreaM2] = useState<string | number>(0);
   const [foto, setFoto] = useState('');
   const [fotoSizeKB, setFotoSizeKB] = useState<number>(0);
+  const clearFormError = (field: ContributorFormField) => {
+    setFormErrors(errors => ({ ...errors, [field]: undefined }));
+  };
   const visibleCategories = categoriasContribuintes.filter(
     item => item.status === 'ativo' || item.id === categoria || item.nome === categoria,
   );
@@ -150,6 +156,7 @@ export default function Contribuintes() {
 
   const handleOpenAdd = () => {
     setEditingItem(null);
+    setFormErrors({});
     setNome('');
     setTelefone('');
     setDocumento('');
@@ -268,12 +275,16 @@ export default function Contribuintes() {
 
   const handleOpenEdit = (item: Contribuinte) => {
     setEditingItem(item);
+    setFormErrors({});
     setNome(item.nome);
     setTelefone(item.telefone);
     setDocumento(item.documento);
     setMercadoId(item.mercadoId);
     setNumBanca(item.numBanca);
-    setCategoria(item.categoria);
+    setCategoria(
+      categoriasContribuintes.find(category => category.id === item.categoria || category.nome === item.categoria)?.id
+        || item.categoria,
+    );
     setDimensao(item.dimensao || '');
     setObservacoes(item.observacoes);
     setStatus(item.status === 'ativo' ? 'ativo' : item.reativarEm ? 'inativo-temporario' : 'inativo');
@@ -287,29 +298,30 @@ export default function Contribuintes() {
 
   const handleSave = async () => {
     const statusOnlyEdit = Boolean(editingItem && !canEdit);
-    if (!statusOnlyEdit && (!nome.trim() || !documento.trim() || !mercadoId || !numBanca.trim() || !categoria || !dimensao)) {
-      addNotification({
-        title: 'Erro de Validação',
-        message: 'Preencha Nome, NIF, Mercado, Número da Banca, Categoria e Dimensão.',
-        type: 'warning'
-      });
-      return;
+    const validationErrors: ContributorFormErrors = {};
+    if (!statusOnlyEdit) {
+      if (!nome.trim()) validationErrors.nome = 'Informe o nome do comerciante.';
+      if (!documento.trim()) validationErrors.documento = 'Informe o NIF.';
+      if (!mercadoId) validationErrors.mercadoId = 'Selecione um mercado.';
+      if (!numBanca.trim()) validationErrors.numBanca = 'Informe o número da banca.';
+      if (!categoria) validationErrors.categoria = 'Selecione uma categoria.';
+      if (!dimensao) validationErrors.dimensao = 'Selecione a dimensão comercial.';
     }
 
     const parsedArea = areaM2 === '' ? 0 : Number(areaM2);
     if (!statusOnlyEdit && (!Number.isFinite(parsedArea) || parsedArea < 0)) {
-      addNotification({
-        title: 'Erro de Validação',
-        message: 'A área deve ser um número igual ou superior a zero.',
-        type: 'warning'
-      });
-      return;
+      validationErrors.areaM2 = 'A área deve ser um número igual ou superior a zero.';
     }
 
     if (status === 'inativo-temporario' && !reativarEm) {
+      validationErrors.reativarEm = 'Escolha a data de reativação.';
+    }
+
+    setFormErrors(validationErrors);
+    if (Object.keys(validationErrors).length > 0) {
       addNotification({
         title: 'Erro de Validação',
-        message: 'Escolha a data de reativação para a desativação temporária.',
+        message: 'Verifique os campos assinalados a vermelho.',
         type: 'warning'
       });
       return;
@@ -348,10 +360,10 @@ export default function Contribuintes() {
             : `O contribuinte "${nome.trim()}" foi atualizado com sucesso no banco de dados.`,
           type: 'success'
         });
-      } catch (error) {
+      } catch {
         addNotification({
-          title: 'Falha ao atualizar contribuinte',
-          message: error instanceof Error ? error.message : 'Verifique a ligação e tente novamente.',
+          title: 'Impossível atualizar contribuinte',
+          message: 'Não foi possível atualizar o registo. Verifique a ligação à rede ou tente novamente mais tarde.',
           type: 'warning',
         });
         return;
@@ -384,9 +396,29 @@ export default function Contribuintes() {
           type: 'success'
         });
       } catch (error) {
+        const serverMessage = error instanceof Error ? error.message : '';
+        const serverErrors: ContributorFormErrors = {};
+        if (/preencha/i.test(serverMessage)) {
+          serverErrors.nome = serverMessage;
+          serverErrors.documento = serverMessage;
+          serverErrors.mercadoId = serverMessage;
+          serverErrors.numBanca = serverMessage;
+          serverErrors.categoria = serverMessage;
+          serverErrors.dimensao = serverMessage;
+        }
+        if (/nome/i.test(serverMessage)) serverErrors.nome = serverMessage;
+        if (/nif|documento/i.test(serverMessage)) serverErrors.documento = serverMessage;
+        if (/dimens[aã]o/i.test(serverMessage)) serverErrors.dimensao = serverMessage;
+        if (/mercado/i.test(serverMessage)) serverErrors.mercadoId = serverMessage;
+        if (/banca/i.test(serverMessage)) serverErrors.numBanca = serverMessage;
+        if (/categoria/i.test(serverMessage)) serverErrors.categoria = serverMessage;
+        if (/área|area/i.test(serverMessage)) serverErrors.areaM2 = serverMessage;
+        setFormErrors(serverErrors);
         addNotification({
-          title: 'Falha ao cadastrar contribuinte',
-          message: error instanceof Error ? error.message : 'Verifique a ligação e tente novamente.',
+          title: 'Impossível cadastrar contribuinte',
+          message: Object.keys(serverErrors).length > 0
+            ? 'O servidor rejeitou alguns dados. Verifique os campos assinalados a vermelho.'
+            : 'Não foi possível registrar o contribuinte. Verifique a ligação à rede ou tente novamente mais tarde.',
           type: 'warning',
         });
         return;
@@ -817,10 +849,12 @@ export default function Contribuintes() {
               label="Nome do Comerciante"
               fullWidth
               value={nome}
-              onChange={(e) => setNome(e.target.value)}
+              onChange={(e) => { setNome(e.target.value); clearFormError('nome'); }}
               size="small"
               className="col-span-2"
               id="cont-field-nome"
+              error={Boolean(formErrors.nome)}
+              helperText={formErrors.nome}
             />
             
             <TextField
@@ -828,9 +862,11 @@ export default function Contribuintes() {
               label="Número de Identificação Fiscal (NIF)"
               fullWidth
               value={documento}
-              onChange={(e) => setDocumento(e.target.value)}
+              onChange={(e) => { setDocumento(e.target.value); clearFormError('documento'); }}
               size="small"
               id="cont-field-documento"
+              error={Boolean(formErrors.documento)}
+              helperText={formErrors.documento}
             />
 
             <TextField
@@ -884,10 +920,11 @@ export default function Contribuintes() {
               type="number"
               fullWidth
               value={areaM2}
-              onChange={(e) => setAreaM2(e.target.value)}
+              onChange={(e) => { setAreaM2(e.target.value); clearFormError('areaM2'); }}
               size="small"
               id="cont-field-area"
-              helperText="Dimensão física utilizada para cálculo tributário"
+              error={Boolean(formErrors.areaM2)}
+              helperText={formErrors.areaM2 || 'Dimensão física utilizada para cálculo tributário'}
               slotProps={{
                 input: {
                   startAdornment: (
@@ -901,19 +938,20 @@ export default function Contribuintes() {
               }}
             />
 
-            <FormControl fullWidth size="small" required>
+            <FormControl fullWidth size="small" required error={Boolean(formErrors.mercadoId)}>
               <InputLabel id="cont-merc-label">Mercado Alocado</InputLabel>
               <Select
                 labelId="cont-merc-label"
                 value={mercadoId}
                 label="Mercado Alocado"
-                onChange={(e) => setMercadoId(e.target.value)}
+                onChange={(e) => { setMercadoId(e.target.value); clearFormError('mercadoId'); }}
                 id="cont-field-merc"
               >
                 {allowedMercados.map(m => (
                   <MenuItem key={m.id} value={m.id}>{m.nome}</MenuItem>
                 ))}
               </Select>
+              {formErrors.mercadoId && <FormHelperText>{formErrors.mercadoId}</FormHelperText>}
             </FormControl>
 
             <TextField
@@ -921,39 +959,43 @@ export default function Contribuintes() {
               label="Número da Banca / Box"
               fullWidth
               value={numBanca}
-              onChange={(e) => setNumBanca(e.target.value)}
+              onChange={(e) => { setNumBanca(e.target.value); clearFormError('numBanca'); }}
               size="small"
               id="cont-field-banca"
+              error={Boolean(formErrors.numBanca)}
+              helperText={formErrors.numBanca}
             />
 
-            <FormControl fullWidth size="small" required className="col-span-2">
+            <FormControl fullWidth size="small" required className="col-span-2" error={Boolean(formErrors.categoria)}>
               <InputLabel id="cont-cat-label">Categoria de Contribuinte</InputLabel>
               <Select
                 labelId="cont-cat-label"
                 value={categoria}
                 label="Categoria de Contribuinte"
-                onChange={(e) => setCategoria(e.target.value)}
+                onChange={(e) => { setCategoria(e.target.value); clearFormError('categoria'); }}
                 id="cont-field-cat"
               >
                 {visibleCategories.map(item => (
-                  <MenuItem key={item.id} value={item.nome}>{item.nome}</MenuItem>
+                  <MenuItem key={item.id} value={item.id}>{item.nome}</MenuItem>
                 ))}
               </Select>
+              {formErrors.categoria && <FormHelperText>{formErrors.categoria}</FormHelperText>}
             </FormControl>
 
-            <FormControl fullWidth size="small" required className="col-span-2">
+            <FormControl fullWidth size="small" required className="col-span-2" error={Boolean(formErrors.dimensao)}>
               <InputLabel id="cont-dimensao-label">Dimensão Comercial</InputLabel>
               <Select
                 labelId="cont-dimensao-label"
                 value={dimensao}
                 label="Dimensão Comercial"
-                onChange={(e) => setDimensao(e.target.value)}
+                onChange={(e) => { setDimensao(e.target.value); clearFormError('dimensao'); }}
                 id="cont-field-dimensao"
               >
                 {['Micro', 'Pequeno', 'Médio', 'Grande'].map(size => (
                   <MenuItem key={size} value={size}>{size}</MenuItem>
                 ))}
               </Select>
+              {formErrors.dimensao && <FormHelperText>{formErrors.dimensao}</FormHelperText>}
             </FormControl>
 
             <TextField
@@ -995,12 +1037,13 @@ export default function Contribuintes() {
                 type="date"
                 fullWidth
                 value={reativarEm}
-                onChange={event => setReativarEm(event.target.value)}
                 size="small"
                 className="col-span-2"
                 required
+                error={Boolean(formErrors.reativarEm)}
                 slotProps={{ inputLabel: { shrink: true } }}
-                helperText="Escolha a data em que o contribuinte será reativado automaticamente."
+                helperText={formErrors.reativarEm || 'Escolha a data em que o contribuinte será reativado automaticamente.'}
+                onChange={event => { setReativarEm(event.target.value); clearFormError('reativarEm'); }}
                 id="cont-field-reativar-em"
               />
             )}
