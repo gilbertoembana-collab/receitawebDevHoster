@@ -59,6 +59,12 @@ export default function Municipios() {
   const [email, setEmail] = useState('');
   const [responsavel, setResponsavel] = useState('');
   const [status, setStatus] = useState<'ativo' | 'inativo'>('ativo');
+  const [formErrors, setFormErrors] = useState<{
+    nome?: string;
+    codigo?: string;
+    responsavel?: string;
+    email?: string;
+  }>({});
   
   // Licensing & Hierarchy Fields
   const [paisId, setPaisId] = useState('GW');
@@ -98,6 +104,7 @@ export default function Municipios() {
 
   const handleOpenAdd = () => {
     setEditingItem(null);
+    setFormErrors({});
     setNome('');
     setCodigo('');
     setRegiao('');
@@ -122,6 +129,7 @@ export default function Municipios() {
 
   const handleOpenEdit = (item: Municipio) => {
     setEditingItem(item);
+    setFormErrors({});
     setNome(item.nome);
     setCodigo(item.codigo);
     setRegiao(item.regiao);
@@ -144,11 +152,19 @@ export default function Municipios() {
     setOpenDialog(true);
   };
 
-  const handleSave = () => {
-    if (!nome.trim() || !codigo.trim() || !responsavel.trim()) {
+  const handleSave = async () => {
+    const validationErrors: typeof formErrors = {};
+    if (!nome.trim()) validationErrors.nome = 'Informe o nome do município.';
+    if (!codigo.trim()) validationErrors.codigo = 'Informe o código de identificação.';
+    if (!responsavel.trim()) validationErrors.responsavel = 'Informe o nome do responsável.';
+    if (email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+      validationErrors.email = 'Informe um endereço de e-mail válido.';
+    }
+    setFormErrors(validationErrors);
+    if (Object.keys(validationErrors).length > 0) {
       addNotification({
         title: 'Erro de Validação',
-        message: 'Por favor, preencha os campos obrigatórios (Nome, Código e Responsável).',
+        message: 'Preencha os campos obrigatórios assinalados a vermelho.',
         type: 'warning'
       });
       return;
@@ -184,7 +200,16 @@ export default function Municipios() {
         type: 'success'
       });
     } else {
-      addMunicipio(payload);
+      try {
+        await addMunicipio(payload);
+      } catch (error) {
+        addNotification({
+          title: 'Impossível registar município',
+          message: error instanceof Error ? error.message : 'Não foi possível comunicar com o servidor. Tente novamente.',
+          type: 'warning',
+        });
+        return;
+      }
       addNotification({
         title: 'Município Cadastrado',
         message: `O município "${nome}" foi licenciado com sucesso na plataforma nacional.`,
@@ -490,10 +515,15 @@ export default function Municipios() {
               label="Nome do Ente Local / Município"
               fullWidth
               value={nome}
-              onChange={(e) => setNome(e.target.value)}
+              onChange={(e) => {
+                setNome(e.target.value);
+                if (e.target.value.trim()) setFormErrors(errors => ({ ...errors, nome: undefined }));
+              }}
               size="small"
               className="col-span-2 md:col-span-1"
               id="muni-field-nome"
+              error={Boolean(formErrors.nome)}
+              helperText={formErrors.nome}
             />
             <TextField
               required
@@ -501,18 +531,28 @@ export default function Municipios() {
               placeholder="Ex: BIS-01"
               fullWidth
               value={codigo}
-              onChange={(e) => setCodigo(e.target.value)}
+              onChange={(e) => {
+                setCodigo(e.target.value);
+                if (e.target.value.trim()) setFormErrors(errors => ({ ...errors, codigo: undefined }));
+              }}
               size="small"
               id="muni-field-codigo"
+              error={Boolean(formErrors.codigo)}
+              helperText={formErrors.codigo}
             />
             <TextField
               required
               label="Nome do Responsável / Prefeito"
               fullWidth
               value={responsavel}
-              onChange={(e) => setResponsavel(e.target.value)}
+              onChange={(e) => {
+                setResponsavel(e.target.value);
+                if (e.target.value.trim()) setFormErrors(errors => ({ ...errors, responsavel: undefined }));
+              }}
               size="small"
               id="muni-field-responsavel"
+              error={Boolean(formErrors.responsavel)}
+              helperText={formErrors.responsavel}
             />
             <TextField
               select
@@ -575,9 +615,16 @@ export default function Municipios() {
               type="email"
               fullWidth
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(e) => {
+                setEmail(e.target.value);
+                if (!e.target.value.trim() || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e.target.value.trim())) {
+                  setFormErrors(errors => ({ ...errors, email: undefined }));
+                }
+              }}
               size="small"
               id="muni-field-email"
+              error={Boolean(formErrors.email)}
+              helperText={formErrors.email}
             />
             <TextField
               label="Endereço Sede"

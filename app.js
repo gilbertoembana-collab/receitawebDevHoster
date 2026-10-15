@@ -3,7 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import pg from 'pg';
 import dotenv from 'dotenv';
-import { createAuthSecurity, hashPassword, migratePlaintextPasswords, verifyStoredPassword } from './src/auth/security.js';
+import { createAuthSecurity, hashPassword, migratePlaintextPasswords, normalizeAgentPermissions, verifyStoredPassword } from './src/auth/security.js';
 
 dotenv.config();
 
@@ -603,7 +603,7 @@ app.post('/api/auth/login', auth.authRateLimit, async (req, res) => {
 
     if (check.needsRehash) {
       await pool.query('UPDATE usuarios SET senha = $1 WHERE id = $2', [
-        await hashPassword(password, { minimumLength: 1 }),
+        await hashPassword(password, { minimumLength: 1, maximumLength: 128 }),
         user.id,
       ]);
     }
@@ -644,8 +644,8 @@ app.post('/api/auth/change-password', async (req, res) => {
   try {
     if (req.auth.kind !== 'user') return res.status(403).json({ error: 'Ação não autorizada.' });
     const { currentPassword, newPassword } = req.body;
-    if (typeof currentPassword !== 'string' || !currentPassword || typeof newPassword !== 'string' || newPassword.length < 12 || newPassword.length > 128) {
-      return res.status(400).json({ error: 'A senha atual e uma nova senha de 12 a 128 caracteres são obrigatórias.' });
+    if (typeof currentPassword !== 'string' || !currentPassword || typeof newPassword !== 'string' || newPassword.length < 8 || newPassword.length > 20) {
+      return res.status(400).json({ error: 'A senha atual e uma nova senha de 8 a 20 caracteres são obrigatórias.' });
     }
     const result = await pool.query('SELECT senha, status FROM usuarios WHERE id = $1', [req.auth.id]);
     if (!result.rows[0] || result.rows[0].status !== 'ativo') return res.status(401).json({ error: 'Sessão inválida.' });
@@ -682,8 +682,8 @@ app.post('/api/usuarios', async (req, res) => {
   try {
     const b = req.body;
     if (typeof b.nome !== 'string' || !b.nome.trim() || typeof b.email !== 'string' || !b.email.includes('@')
-      || typeof b.senha !== 'string' || b.senha.length < 12 || b.senha.length > 128) {
-      return res.status(400).json({ error: 'Nome, e-mail válido e senha de 12 a 128 caracteres são obrigatórios.' });
+      || typeof b.senha !== 'string' || b.senha.length < 8 || b.senha.length > 20) {
+      return res.status(400).json({ error: 'Nome, e-mail válido e senha de 8 a 20 caracteres são obrigatórios.' });
     }
     const tenantId = getTenantFilter(req);
     const mId = tenantId === null ? (b.municipioId || b.municipio_id || null) : tenantId;
@@ -873,12 +873,16 @@ app.post('/api/agentes', async (req, res) => {
     }
     const market = await pool.query('SELECT 1 FROM mercados WHERE id = $1 AND municipio_id = $2', [mercadoId, municipioId]);
     if (!market.rowCount) return res.status(400).json({ error: 'Mercado inválido para o município.' });
-    const permissoes = Array.isArray(b.permissoes) ? b.permissoes.join(',') : (b.permissoes || '');
-    if (b.senha !== undefined && b.senha !== null && (typeof b.senha !== 'string' || b.senha.length < 12 || b.senha.length > 128)) {
-      return res.status(400).json({ error: 'A senha deve ter entre 12 e 128 caracteres.' });
+    const normalizedPermissions = normalizeAgentPermissions(b.permissoes);
+    if (!normalizedPermissions) {
+      return res.status(400).json({ error: 'Selecione pelo menos uma permissão válida para o agente.' });
     }
-    if (temporaryPassword !== null && (typeof temporaryPassword !== 'string' || temporaryPassword.length < 8 || temporaryPassword.length > 128)) {
-      return res.status(400).json({ error: 'A senha temporária deve ter entre 8 e 128 caracteres.' });
+    const permissoes = normalizedPermissions.join(',');
+    if (b.senha !== undefined && b.senha !== null && (typeof b.senha !== 'string' || b.senha.length < 8 || b.senha.length > 20)) {
+      return res.status(400).json({ error: 'A senha deve ter entre 8 e 20 caracteres.' });
+    }
+    if (temporaryPassword !== null && (typeof temporaryPassword !== 'string' || temporaryPassword.length < 8 || temporaryPassword.length > 20)) {
+      return res.status(400).json({ error: 'A senha temporária deve ter entre 8 e 20 caracteres.' });
     }
     if (!b.senha && !temporaryPassword) return res.status(400).json({ error: 'Defina uma senha ou senha temporária para o agente.' });
     const senhaHash = b.senha ? await hashPassword(b.senha) : null;
@@ -911,7 +915,7 @@ app.post('/api/agentes/login', auth.authRateLimit, async (req, res) => {
     if (!normalCheck.valid && !temporaryCheck.valid) return res.status(401).json({ error: 'Utilizador ou senha inválidos.' });
     if (normalCheck.needsRehash) {
       await pool.query('UPDATE agentes SET senha = $1 WHERE id = $2', [
-        await hashPassword(senha, { minimumLength: 1 }),
+        await hashPassword(senha, { minimumLength: 1, maximumLength: 128 }),
         agent.id,
       ]);
     }
@@ -949,8 +953,8 @@ app.post('/api/agentes/alterar-senha', async (req, res) => {
       return res.status(403).json({ error: 'Ação não autorizada.' });
     }
     const { senhaAtual, novaSenha } = req.body;
-    if (typeof senhaAtual !== 'string' || !senhaAtual || typeof novaSenha !== 'string' || novaSenha.length < 12 || novaSenha.length > 128) {
-      return res.status(400).json({ error: 'A senha atual e uma nova senha de 12 a 128 caracteres são obrigatórias.' });
+    if (typeof senhaAtual !== 'string' || !senhaAtual || typeof novaSenha !== 'string' || novaSenha.length < 8 || novaSenha.length > 20) {
+      return res.status(400).json({ error: 'A senha atual e uma nova senha de 8 a 20 caracteres são obrigatórias.' });
     }
     const result = await pool.query('SELECT senha, senha_temporaria, status FROM agentes WHERE id = $1', [req.auth.id]);
     const agent = result.rows[0];

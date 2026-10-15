@@ -259,7 +259,7 @@ class PostgresSyncEngine {
   }
 
   // Add Item
-  addDocument<K extends keyof typeof this.data>(collection: K, doc: any): any {
+  async addDocument<K extends keyof typeof this.data>(collection: K, doc: any): Promise<any> {
     const id = doc.id || `${collection.slice(0, 4)}-${Math.random().toString(36).substring(2, 11)}`;
     const newDoc = {
       id,
@@ -272,6 +272,27 @@ class PostgresSyncEngine {
     };
 
     const safeDoc = omitCredentialFields(newDoc);
+    const path = collection === 'tipos_receita' ? 'tipos_receita' : collection;
+    let response: Response;
+    try {
+      response = await apiFetch(`/api/${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newDoc)
+      });
+    } catch (error) {
+      throw new Error(error instanceof Error
+        ? `Não foi possível comunicar com o servidor: ${error.message}`
+        : 'Não foi possível comunicar com o servidor.');
+    }
+
+    const result = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(typeof result?.error === 'string'
+        ? result.error
+        : `Não foi possível registar os dados (HTTP ${response.status}).`);
+    }
+
     if (Array.isArray(this.data[collection])) {
       (this.data[collection] as any[]).unshift(safeDoc);
       if (collection === 'contribuintes') {
@@ -285,14 +306,6 @@ class PostgresSyncEngine {
     }
     this.saveToLocalStorage(collection);
     this.notify(collection);
-
-    // Persist to Postgres database asynchronously
-    const path = collection === 'tipos_receita' ? 'tipos_receita' : collection;
-    apiFetch(`/api/${path}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(newDoc)
-    }).catch(err => console.warn('Failed to sync insert with Postgres:', err));
 
     this.addAuditLog('criacao', `Criado novo registro em ${collection}: ${doc.nome || doc.id || ''}`);
     return newDoc;

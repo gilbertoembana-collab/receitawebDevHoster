@@ -25,7 +25,7 @@ interface Despesa {
 const INITIAL_DESPESAS: Despesa[] = [];
 
 export default function Financeiro() {
-  const { pagamentos, configuracoes, agentes, mercados, activeProfile, updateConfiguracoes, addNotification, currentUser } = useAppStore();
+  const { pagamentos, configuracoes, agentes, mercados, activeProfile, updateConfiguracoes, saveConfiguracoes, addNotification, currentUser } = useAppStore();
   const isAdmin = ['Administrador Municipal', 'Administrator'].includes(activeProfile);
   const userMuniId = currentUser?.municipioId || '';
 
@@ -50,6 +50,7 @@ export default function Financeiro() {
   const [openPaymentDialog, setOpenPaymentDialog] = useState(false);
   const [paymentAmount, setPaymentAmount] = useState<string>('');
   const [paymentMemo, setPaymentMemo] = useState<string>('');
+  const [paymentAmountError, setPaymentAmountError] = useState('');
 
   // States for Add Expense Dialog
   const [openExpenseDialog, setOpenExpenseDialog] = useState(false);
@@ -57,11 +58,21 @@ export default function Financeiro() {
   const [expenseCat, setExpenseCat] = useState('Suprimentos');
   const [expenseVal, setExpenseVal] = useState('');
   const [expenseResp, setExpenseResp] = useState(currentUser?.nome || '');
+  const [expenseErrors, setExpenseErrors] = useState<{ descricao?: string; valor?: string; responsavel?: string }>({});
 
   const handleAddExpense = () => {
     const val = Number(expenseVal);
-    if (!expenseDesc.trim() || isNaN(val) || val <= 0) {
-      alert('Por favor, preencha uma descrição válida e um valor numérico superior a zero.');
+    const validationErrors: typeof expenseErrors = {};
+    if (!expenseDesc.trim()) validationErrors.descricao = 'Informe a descrição da despesa.';
+    if (!expenseVal.trim() || !Number.isFinite(val) || val <= 0) validationErrors.valor = 'Informe um valor superior a zero.';
+    if (!expenseResp.trim()) validationErrors.responsavel = 'Informe o responsável pela despesa.';
+    setExpenseErrors(validationErrors);
+    if (Object.keys(validationErrors).length > 0) {
+      addNotification({
+        title: 'Verifique os campos obrigatórios',
+        message: 'Corrija os campos assinalados a vermelho antes de registar.',
+        type: 'warning',
+      });
       return;
     }
     const newDespesa: Despesa = {
@@ -70,9 +81,20 @@ export default function Financeiro() {
       categoria: expenseCat,
       valor: val,
       data: new Date().toISOString().split('T')[0],
-      responsavel: expenseResp || currentUser?.nome || 'Financeiro'
+      responsavel: expenseResp.trim()
     };
-    setDespesas(prev => [newDespesa, ...prev]);
+    try {
+      const updatedExpenses = [newDespesa, ...despesas];
+      localStorage.setItem('receita360_despesas', JSON.stringify(updatedExpenses));
+      setDespesas(updatedExpenses);
+    } catch (error) {
+      addNotification({
+        title: 'Impossível registar despesa',
+        message: error instanceof Error ? error.message : 'Não foi possível guardar os dados neste dispositivo.',
+        type: 'warning',
+      });
+      return;
+    }
     addNotification({
       title: 'Despesa Registrada',
       message: `Despesa de ${val.toLocaleString()} ${configuracoes.moeda} adicionada com sucesso.`,
@@ -81,6 +103,7 @@ export default function Financeiro() {
     setOpenExpenseDialog(false);
     setExpenseDesc('');
     setExpenseVal('');
+    setExpenseErrors({});
   };
 
   const handleClearDespesas = () => {
@@ -265,23 +288,32 @@ export default function Financeiro() {
     };
   }, [pagamentos, agentes, mercados, comissaoPercent, justificationSearch, selectedMarketFilter, selectedAgentFilter, configuracoes.comissaoPaga, isAdmin, userMuniId]);
 
-  const handleConfirmCommissionPayment = () => {
+  const handleConfirmCommissionPayment = async () => {
     const val = Number(paymentAmount);
     if (!paymentAmount || isNaN(val) || val <= 0) {
+      setPaymentAmountError('Informe um valor superior a zero.');
       addNotification({
-        title: 'Valor Inválido',
-        message: 'Por favor, insira um valor numérico válido maior que zero.',
+        title: 'Verifique o valor',
+        message: 'Corrija o campo assinalado a vermelho antes de registar.',
         type: 'warning'
       });
       return;
     }
+    setPaymentAmountError('');
 
     const currentPaid = configuracoes.comissaoPaga || 0;
     const newPaid = currentPaid + val;
 
-    updateConfiguracoes({
-      comissaoPaga: newPaid
-    });
+    try {
+      await saveConfiguracoes({ comissaoPaga: newPaid });
+    } catch (error) {
+      addNotification({
+        title: 'Impossível registar pagamento',
+        message: error instanceof Error ? error.message : 'Não foi possível comunicar com o servidor. Tente novamente.',
+        type: 'warning',
+      });
+      return;
+    }
 
     addNotification({
       title: 'Pagamento de Comissão Registrado',
@@ -289,10 +321,10 @@ export default function Financeiro() {
       type: 'success'
     });
 
-    alert(`Pagamento de ${val.toLocaleString()} ${configuracoes.moeda} confirmado e registrado com sucesso!`);
     setOpenPaymentDialog(false);
     setPaymentAmount('');
     setPaymentMemo('');
+    setPaymentAmountError('');
   };
 
   const handleResetCommissionPayments = () => {
@@ -920,7 +952,10 @@ export default function Financeiro() {
       </Dialog>
 
       {/* Commission Payment Dialog */}
-      <Dialog open={openPaymentDialog} onClose={() => setOpenPaymentDialog(false)} maxWidth="xs" fullWidth>
+      <Dialog open={openPaymentDialog} onClose={() => {
+        setOpenPaymentDialog(false);
+        setPaymentAmountError('');
+      }} maxWidth="xs" fullWidth>
         <DialogTitle sx={{ fontWeight: 700, display: 'flex', gap: 1, alignItems: 'center' }}>
           <Coins className="text-blue-600" size={20} />
           <span>Confirmar Pagamento de Comissão</span>
@@ -961,8 +996,13 @@ export default function Financeiro() {
                 fullWidth
                 size="small"
                 value={paymentAmount}
-                onChange={(e) => setPaymentAmount(e.target.value)}
-                helperText={`Informe o valor pago em ${configuracoes.moeda}`}
+                onChange={(e) => {
+                  setPaymentAmount(e.target.value);
+                  const value = Number(e.target.value);
+                  if (e.target.value.trim() && Number.isFinite(value) && value > 0) setPaymentAmountError('');
+                }}
+                error={Boolean(paymentAmountError)}
+                helperText={paymentAmountError || `Informe o valor pago em ${configuracoes.moeda}`}
                 id="payment-amount"
               />
               {recoveryData.saldoEmDivida > 0 && (
@@ -1000,7 +1040,6 @@ export default function Financeiro() {
             onClick={handleConfirmCommissionPayment} 
             startIcon={<CheckCircle size={14} />} 
             id="btn-submit-payment"
-            disabled={!paymentAmount || Number(paymentAmount) <= 0}
           >
             Confirmar e Registrar
           </Button>
@@ -1010,7 +1049,10 @@ export default function Financeiro() {
       {/* Dialog for Registering New Expense */}
       <Dialog 
         open={openExpenseDialog} 
-        onClose={() => setOpenExpenseDialog(false)}
+      onClose={() => {
+        setOpenExpenseDialog(false);
+        setExpenseErrors({});
+      }}
         maxWidth="xs"
         fullWidth
         id="dialog-registrar-despesa"
@@ -1027,8 +1069,13 @@ export default function Financeiro() {
               fullWidth
               size="small"
               value={expenseDesc}
-              onChange={(e) => setExpenseDesc(e.target.value)}
+              onChange={(e) => {
+                setExpenseDesc(e.target.value);
+                if (e.target.value.trim()) setExpenseErrors(errors => ({ ...errors, descricao: undefined }));
+              }}
               placeholder="Ex: Suprimentos térmicos para impressoras"
+              error={Boolean(expenseErrors.descricao)}
+              helperText={expenseErrors.descricao}
             />
             <FormControl fullWidth size="small">
               <InputLabel id="categoria-despesa-label">Categoria</InputLabel>
@@ -1052,14 +1099,28 @@ export default function Financeiro() {
               fullWidth
               size="small"
               value={expenseVal}
-              onChange={(e) => setExpenseVal(e.target.value)}
+              onChange={(e) => {
+                setExpenseVal(e.target.value);
+                const value = Number(e.target.value);
+                if (e.target.value.trim() && Number.isFinite(value) && value > 0) {
+                  setExpenseErrors(errors => ({ ...errors, valor: undefined }));
+                }
+              }}
+              error={Boolean(expenseErrors.valor)}
+              helperText={expenseErrors.valor}
             />
             <TextField
+              required
               label="Responsável"
               fullWidth
               size="small"
               value={expenseResp}
-              onChange={(e) => setExpenseResp(e.target.value)}
+              onChange={(e) => {
+                setExpenseResp(e.target.value);
+                if (e.target.value.trim()) setExpenseErrors(errors => ({ ...errors, responsavel: undefined }));
+              }}
+              error={Boolean(expenseErrors.responsavel)}
+              helperText={expenseErrors.responsavel}
             />
           </Box>
         </DialogContent>

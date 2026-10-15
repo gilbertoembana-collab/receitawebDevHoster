@@ -16,12 +16,12 @@ import { and, asc, count, desc, eq, ilike, or, type SQL } from 'drizzle-orm';
 import { initializeDatabase } from './src/db/init.ts';
 import { resolvePostgresSsl } from './src/db/postgres-ssl.js';
 import { normalizeSqlDump } from './src/db/restore-sql.js';
-import { createAuthSecurity, hashPassword, verifyStoredPassword } from './src/auth/security.js';
+import { createAuthSecurity, hashPassword, normalizeAgentPermissions, verifyStoredPassword } from './src/auth/security.js';
 
 async function hashImportedPassword(value: unknown): Promise<string | null> {
   if (typeof value !== 'string' || !value) return null;
   if (value.startsWith('$argon2id$') || /^[a-f0-9]{64}$/i.test(value)) return value;
-  return hashPassword(value, { minimumLength: 1 });
+  return hashPassword(value, { minimumLength: 1, maximumLength: 128 });
 }
 
 function classifyImportedContributor(activityValue: unknown, categoryValue: unknown) {
@@ -1137,7 +1137,7 @@ async function startServer() {
       if (passwordCheck.needsRehash) {
         await createPool().query(
           'UPDATE usuarios SET senha = $1 WHERE id = $2',
-          [await hashPassword(password, { minimumLength: 1 }), user.id],
+          [await hashPassword(password, { minimumLength: 1, maximumLength: 128 }), user.id],
         );
       }
 
@@ -1193,8 +1193,8 @@ async function startServer() {
     try {
       if (req.auth?.kind !== 'user') return res.status(403).json({ error: 'Ação não autorizada.' });
       const { currentPassword, newPassword } = req.body;
-      if (typeof currentPassword !== 'string' || !currentPassword || typeof newPassword !== 'string' || newPassword.length < 12 || newPassword.length > 128) {
-        return res.status(400).json({ error: 'A senha atual e uma nova senha de 12 a 128 caracteres são obrigatórias.' });
+      if (typeof currentPassword !== 'string' || !currentPassword || typeof newPassword !== 'string' || newPassword.length < 8 || newPassword.length > 20) {
+        return res.status(400).json({ error: 'A senha atual e uma nova senha de 8 a 20 caracteres são obrigatórias.' });
       }
       const rows = await db.select().from(usuarios).where(eq(usuarios.id, req.auth.id)).limit(1);
       const user = rows[0];
@@ -1241,8 +1241,8 @@ async function startServer() {
   app.post('/api/usuarios', async (req, res) => {
     try {
       const b = req.body;
-      if (typeof b.senha !== 'string' || b.senha.length < 12 || b.senha.length > 128) {
-        return res.status(400).json({ error: 'A senha é obrigatória e deve ter entre 12 e 128 caracteres.' });
+      if (typeof b.senha !== 'string' || b.senha.length < 8 || b.senha.length > 20) {
+        return res.status(400).json({ error: 'A senha é obrigatória e deve ter entre 8 e 20 caracteres.' });
       }
       const senhaHash = await hashPassword(b.senha);
 
@@ -1285,8 +1285,8 @@ async function startServer() {
       }
       
       if (b.senha !== undefined && b.senha !== null && b.senha !== '') {
-        if (typeof b.senha !== 'string' || b.senha.length < 12 || b.senha.length > 128) {
-          return res.status(400).json({ error: 'A senha deve ter entre 12 e 128 caracteres.' });
+        if (typeof b.senha !== 'string' || b.senha.length < 8 || b.senha.length > 20) {
+          return res.status(400).json({ error: 'A senha deve ter entre 8 e 20 caracteres.' });
         }
         updateData.senha = await hashPassword(b.senha);
       }
@@ -1552,11 +1552,17 @@ async function startServer() {
   app.post('/api/agentes', async (req, res) => {
     try {
       const b = req.body;
-      const permissoes = b.permissoes;
-      if (b.senha !== undefined && b.senha !== null && (typeof b.senha !== 'string' || b.senha.length < 12 || b.senha.length > 128)) {
-        return res.status(400).json({ error: 'A senha deve ter entre 12 e 128 caracteres.' });
+      const permissoes = normalizeAgentPermissions(b.permissoes);
+      if (!permissoes) {
+        return res.status(400).json({ error: 'Selecione pelo menos uma permissão válida para o agente.' });
+      }
+      if (b.senha !== undefined && b.senha !== null && (typeof b.senha !== 'string' || b.senha.length < 8 || b.senha.length > 20)) {
+        return res.status(400).json({ error: 'A senha deve ter entre 8 e 20 caracteres.' });
       }
       const temporaryPassword = b.senhaTemporaria || b.senha_temporaria || null;
+      if (temporaryPassword !== null && (typeof temporaryPassword !== 'string' || temporaryPassword.length < 8 || temporaryPassword.length > 20)) {
+        return res.status(400).json({ error: 'A senha temporária deve ter entre 8 e 20 caracteres.' });
+      }
       const value = {
         id: b.id || `agent-${Date.now()}`,
         foto: b.foto || null,
@@ -1587,10 +1593,21 @@ async function startServer() {
       const { permissoes, senha_temporaria, senhaTemporaria, reset_senha_pending, resetSenhaPending, senha, ...rest } = req.body;
       const updateData: any = { ...rest };
       if (permissoes !== undefined) {
-        updateData.permissoes = Array.isArray(permissoes) ? permissoes.join(',') : (permissoes || '');
+        const normalizedPermissions = normalizeAgentPermissions(permissoes);
+        if (!normalizedPermissions) {
+          return res.status(400).json({ error: 'Selecione pelo menos uma permissão válida para o agente.' });
+        }
+        updateData.permissoes = normalizedPermissions.join(',');
       }
       const requestedTemporaryPassword = senhaTemporaria ?? senha_temporaria;
       if (requestedTemporaryPassword !== undefined) {
+        if (requestedTemporaryPassword && (
+          typeof requestedTemporaryPassword !== 'string'
+          || requestedTemporaryPassword.length < 8
+          || requestedTemporaryPassword.length > 20
+        )) {
+          return res.status(400).json({ error: 'A senha temporária deve ter entre 8 e 20 caracteres.' });
+        }
         updateData.senhaTemporaria = requestedTemporaryPassword
           ? await hashPassword(requestedTemporaryPassword.toUpperCase(), { minimumLength: 8 })
           : null;
@@ -1600,8 +1617,8 @@ async function startServer() {
         updateData.resetSenhaPending = resetSenhaPending ?? reset_senha_pending;
       }
       if (senha !== undefined && senha !== null) {
-        if (typeof senha !== 'string' || senha.length < 12 || senha.length > 128) {
-          return res.status(400).json({ error: 'A senha deve ter entre 12 e 128 caracteres.' });
+        if (typeof senha !== 'string' || senha.length < 8 || senha.length > 20) {
+          return res.status(400).json({ error: 'A senha deve ter entre 8 e 20 caracteres.' });
         }
         updateData.senha = await hashPassword(senha);
       }
@@ -1652,7 +1669,7 @@ async function startServer() {
 
       if (regularCheck.needsRehash) {
         await db.update(agentes).set({
-          senha: await hashPassword(senha.trim(), { minimumLength: 1 }),
+          senha: await hashPassword(senha.trim(), { minimumLength: 1, maximumLength: 128 }),
         }).where(eq(agentes.id, agente.id));
       }
       if (temporaryCheck.needsRehash) {
@@ -1697,8 +1714,8 @@ async function startServer() {
       if (req.auth?.kind !== 'agent' || (agenteId && agenteId !== req.auth.id)) {
         return res.status(403).json({ error: 'Ação não autorizada.' });
       }
-      if (typeof senhaAtual !== 'string' || !senhaAtual || typeof novaSenha !== 'string' || novaSenha.length < 12 || novaSenha.length > 128) {
-        return res.status(400).json({ error: 'A senha atual e uma nova senha de 12 a 128 caracteres são obrigatórias.' });
+      if (typeof senhaAtual !== 'string' || !senhaAtual || typeof novaSenha !== 'string' || novaSenha.length < 8 || novaSenha.length > 20) {
+        return res.status(400).json({ error: 'A senha atual e uma nova senha de 8 a 20 caracteres são obrigatórias.' });
       }
 
       const rows = await db.select().from(agentes).where(eq(agentes.id, req.auth.id)).limit(1);

@@ -5,7 +5,7 @@ import { Plus, Edit2, Trash2, Search, Key, Shield, Check, X, RefreshCw, FileSpre
 import { 
   Box, Typography, Button, TextField, Table, TableBody, TableCell, 
   TableContainer, TableHead, TableRow, Paper, Dialog, DialogTitle, 
-  DialogContent, DialogActions, Chip, FormControl, Select, MenuItem, 
+  DialogContent, DialogActions, Chip, FormControl, FormHelperText, Select, MenuItem,
   InputLabel, Checkbox, ListItemText, OutlinedInput, Tooltip,
   TablePagination, InputAdornment
 } from '@mui/material';
@@ -14,14 +14,8 @@ import { exportToExcel, printToPDF } from '../../utils/export';
 const AVAILABLE_PERMISSIONS = ['Cobrar', 'Imprimir Recibo', 'Offline', 'Aprovar Isenção', 'Reemitir'];
 
 const getAgentCode = (a: Agente) => {
-  if (a.id.startsWith('agent-')) {
-    const num = a.id.split('-')[1];
-    return `AG-${num.padStart(3, '0')}`;
-  }
-  if (a.usuario.startsWith('AG')) {
-    return a.usuario;
-  }
-  return `AG-${a.id.slice(-4).toUpperCase()}`;
+  if (a.usuario.toUpperCase().startsWith('AG00')) return a.usuario.toUpperCase();
+  return `AG00${a.id.slice(-4).toUpperCase()}`;
 };
 
 export default function Agentes() {
@@ -37,11 +31,6 @@ export default function Agentes() {
   const [resetPasswordInfo, setResetPasswordInfo] = useState<{ nome: string; senhaTemporaria: string } | null>(null);
   const [copiedPassword, setCopiedPassword] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
-
-  // Quick Target Adjustment State
-  const [openTargetDialog, setOpenTargetDialog] = useState(false);
-  const [targetAgente, setTargetAgente] = useState<Agente | null>(null);
-  const [targetGoalValue, setTargetGoalValue] = useState<number | string>('');
 
   // Pagination states
   const [page, setPage] = useState(0);
@@ -80,9 +69,17 @@ export default function Agentes() {
   const [municipioId, setMunicipioId] = useState('');
   const [cargo, setCargo] = useState('');
   const [status, setStatus] = useState<'ativo' | 'inativo'>('ativo');
-  const [permissoes, setPermissoes] = useState<string[]>(['Cobrar', 'Imprimir Recibo']);
+  const [permissoes, setPermissoes] = useState<string[]>([]);
   const [senha, setSenha] = useState('');
-  const [metaDiaria, setMetaDiaria] = useState<number>(configuracoes.metaDiariaAgente ?? 100000);
+  const [formErrors, setFormErrors] = useState<{
+    nome?: string;
+    usuario?: string;
+    municipioId?: string;
+    mercadoId?: string;
+    senha?: string;
+    email?: string;
+    permissoes?: string;
+  }>({});
 
   const filtered = agentes.filter(a => {
     if (isAdmin && a.municipioId !== userMuniId) {
@@ -101,22 +98,23 @@ export default function Agentes() {
 
   const handleOpenAdd = () => {
     setEditingItem(null);
+    setFormErrors({});
     setNome('');
     setTelefone('');
     setEmail('');
-    setUsuario(`AG00${agentes.length + 15}`);
-    setMercadoId(allowedMercados[0]?.id || '');
-    setMunicipioId(isAdmin ? userMuniId : (municipios[0]?.id || ''));
-    setCargo('Agente de Cobrança Júnior');
+    setUsuario('');
+    setMercadoId('');
+    setMunicipioId(isAdmin ? userMuniId : '');
+    setCargo('');
     setStatus('ativo');
-    setPermissoes(['Cobrar', 'Imprimir Recibo']);
-    setMetaDiaria(configuracoes.metaDiariaAgente ?? 100000);
+    setPermissoes([]);
     setSenha('');
     setOpenDialog(true);
   };
 
   const handleOpenEdit = (item: Agente) => {
     setEditingItem(item);
+    setFormErrors({});
     setNome(item.nome);
     setTelefone(item.telefone);
     setEmail(item.email);
@@ -126,45 +124,35 @@ export default function Agentes() {
     setCargo(item.cargo);
     setStatus(item.status);
     setPermissoes(item.permissoes || []);
-    setMetaDiaria(item.metaDiaria ?? configuracoes.metaDiariaAgente ?? 100000);
     setOpenDialog(true);
   };
 
-  const handleOpenQuickGoal = (item: Agente) => {
-    setTargetAgente(item);
-    setTargetGoalValue(item.metaDiaria ?? configuracoes.metaDiariaAgente ?? 100000);
-    setOpenTargetDialog(true);
-  };
-
-  const handleSaveQuickGoal = () => {
-    if (targetAgente) {
-      const val = Math.max(0, Number(targetGoalValue) || 0);
-      updateAgente(targetAgente.id, { metaDiaria: val });
-      addNotification({
-        title: 'Meta Diária Atualizada',
-        message: `A meta diária de cobrança do agente ${targetAgente.nome} foi definida para ${val.toLocaleString()} ${configuracoes.moeda}.`,
-        type: 'success'
-      });
-      setOpenTargetDialog(false);
-      setTargetAgente(null);
-    }
-  };
-
-  const handleSave = () => {
+  const handleSave = async () => {
     const targetMuniId = isAdmin ? userMuniId : municipioId;
-    if (!nome.trim() || !usuario.trim() || !mercadoId || !targetMuniId) {
-      addNotification({
-        title: 'Erro de Validação',
-        message: 'Por favor, preencha os campos obrigatórios (Nome, Usuário, Município e Mercado).',
-        type: 'warning'
-      });
-      return;
+    const normalizedAgentId = editingItem
+      ? usuario.trim().toUpperCase()
+      : `AG00${usuario.trim().toUpperCase()}`;
+    const validationErrors: typeof formErrors = {};
+    if (!nome.trim()) validationErrors.nome = 'Informe o nome completo do agente.';
+    if (!usuario.trim() || (!editingItem && !/^[A-Z0-9]+$/.test(usuario.trim()))) {
+      validationErrors.usuario = editingItem
+        ? 'Informe o usuário do terminal.'
+        : 'Informe o sufixo do ID. O identificador será AG00 seguido por esse valor.';
     }
-
-    if (!editingItem && (senha.trim().length < 12 || senha.trim().length > 128)) {
+    if (!targetMuniId) validationErrors.municipioId = 'Selecione o município.';
+    if (!mercadoId) validationErrors.mercadoId = 'Selecione o mercado.';
+    if (permissoes.length === 0) validationErrors.permissoes = 'Selecione pelo menos uma permissão.';
+    if (email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+      validationErrors.email = 'Informe um endereço de e-mail válido.';
+    }
+    if (!editingItem && (senha.trim().length < 8 || senha.trim().length > 20)) {
+      validationErrors.senha = 'A senha deve ter entre 8 e 20 caracteres.';
+    }
+    setFormErrors(validationErrors);
+    if (Object.keys(validationErrors).length > 0) {
       addNotification({
         title: 'Erro de Validação',
-        message: 'A senha do novo agente deve ter entre 12 e 128 caracteres.',
+        message: 'Preencha os campos obrigatórios assinalados a vermelho.',
         type: 'warning'
       });
       return;
@@ -174,13 +162,12 @@ export default function Agentes() {
       nome: nome.trim(), 
       telefone: telefone.trim(), 
       email: email.trim().toLowerCase(), 
-      usuario: usuario.trim().toUpperCase(), 
+      usuario: normalizedAgentId,
       mercadoId, 
       municipioId: targetMuniId, 
       cargo: cargo.trim(), 
       status, 
       permissoes,
-      metaDiaria: Math.max(0, Number(metaDiaria) || 0)
     };
 
     if (!editingItem) {
@@ -195,7 +182,16 @@ export default function Agentes() {
         type: 'success'
       });
     } else {
-      addAgente(payload);
+      try {
+        await addAgente(payload);
+      } catch (error) {
+        addNotification({
+          title: 'Impossível registar agente',
+          message: error instanceof Error ? error.message : 'Não foi possível comunicar com o servidor. Tente novamente.',
+          type: 'warning',
+        });
+        return;
+      }
       addNotification({
         title: 'Agente Cadastrado',
         message: `O agente "${nome.trim()}" foi cadastrado com sucesso.`,
@@ -269,7 +265,7 @@ export default function Agentes() {
     const data = filtered.map(a => {
       const merc = mercados.find(m => m.id === a.mercadoId)?.nome || 'Não definido';
       const muni = municipios.find(mu => mu.id === a.municipioId)?.nome || 'Não definido';
-      const meta = (a.metaDiaria ?? configuracoes.metaDiariaAgente ?? 100000).toLocaleString() + ' ' + configuracoes.moeda;
+      const meta = (configuracoes.metaDiariaAgente ?? 100000).toLocaleString() + ' ' + configuracoes.moeda;
       return [
         getAgentCode(a),
         a.nome,
@@ -290,7 +286,7 @@ export default function Agentes() {
     const data = filtered.map(a => {
       const merc = mercados.find(m => m.id === a.mercadoId)?.nome || 'Não definido';
       const muni = municipios.find(mu => mu.id === a.municipioId)?.nome || 'Não definido';
-      const meta = (a.metaDiaria ?? configuracoes.metaDiariaAgente ?? 100000).toLocaleString() + ' ' + configuracoes.moeda;
+      const meta = (configuracoes.metaDiariaAgente ?? 100000).toLocaleString() + ' ' + configuracoes.moeda;
       return [
         getAgentCode(a),
         a.nome,
@@ -400,7 +396,7 @@ export default function Agentes() {
               paginated.map((a) => {
                 const muni = municipios.find(m => m.id === a.municipioId);
                 const merc = mercados.find(m => m.id === a.mercadoId);
-                const agentGoal = a.metaDiaria ?? configuracoes.metaDiariaAgente ?? 100000;
+                const agentGoal = configuracoes.metaDiariaAgente ?? 100000;
                 return (
                   <TableRow key={a.id} hover>
                     <TableCell>
@@ -425,11 +421,10 @@ export default function Agentes() {
                     </TableCell>
                     <TableCell>{a.cargo}</TableCell>
                     <TableCell>
-                      <Tooltip title={canEdit ? "Clique para alterar a meta de arrecadação diária deste agente" : "Meta diária de arrecadação"} arrow>
+                      <Tooltip title="Meta diária definida nas configurações do sistema" arrow>
                         <Box 
-                          onClick={() => canEdit && handleOpenQuickGoal(a)}
                           sx={{ 
-                            cursor: canEdit ? 'pointer' : 'default',
+                            cursor: 'default',
                             display: 'inline-flex',
                             alignItems: 'center',
                             gap: 0.75,
@@ -438,7 +433,6 @@ export default function Agentes() {
                             bgcolor: 'action.hover',
                             border: '1px solid',
                             borderColor: 'divider',
-                            '&:hover': canEdit ? { bgcolor: 'primary.50', borderColor: 'primary.300' } : {}
                           }}
                         >
                           <Target size={13} className="text-blue-600" />
@@ -550,10 +544,15 @@ export default function Agentes() {
               label="Nome Completo"
               fullWidth
               value={nome}
-              onChange={(e) => setNome(e.target.value)}
+              onChange={(e) => {
+                setNome(e.target.value);
+                if (e.target.value.trim()) setFormErrors(errors => ({ ...errors, nome: undefined }));
+              }}
               size="small"
               className="col-span-2"
               id="agent-field-nome"
+              error={Boolean(formErrors.nome)}
+              helperText={formErrors.nome}
             />
             
             <TextField
@@ -561,10 +560,24 @@ export default function Agentes() {
               label="Usuário (Terminal ID)"
               fullWidth
               value={usuario}
-              onChange={(e) => setUsuario(e.target.value)}
+              onChange={(e) => {
+                const value = editingItem
+                  ? e.target.value.toUpperCase()
+                  : e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').replace(/^AG00/, '');
+                setUsuario(value);
+                if (value.trim()) setFormErrors(errors => ({ ...errors, usuario: undefined }));
+              }}
               size="small"
               disabled={!!editingItem}
               id="agent-field-usuario"
+              error={Boolean(formErrors.usuario)}
+              helperText={formErrors.usuario || (editingItem ? 'O ID do terminal não pode ser alterado.' : 'O prefixo AG00 é fixo; introduza o sufixo único do agente.')}
+              slotProps={{
+                input: {
+                  startAdornment: editingItem ? undefined : <InputAdornment position="start">AG00</InputAdornment>,
+                },
+                htmlInput: { maxLength: 32 },
+              }}
             />
 
             <TextField
@@ -590,9 +603,16 @@ export default function Agentes() {
               type="email"
               fullWidth
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(e) => {
+                setEmail(e.target.value);
+                if (!e.target.value.trim() || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e.target.value.trim())) {
+                  setFormErrors(errors => ({ ...errors, email: undefined }));
+                }
+              }}
               size="small"
               id="agent-field-email"
+              error={Boolean(formErrors.email)}
+              helperText={formErrors.email}
             />
 
             {!editingItem && (
@@ -601,15 +621,22 @@ export default function Agentes() {
                 label="Senha de Acesso Padrão"
                 fullWidth
                 value={senha}
-                onChange={(e) => setSenha(e.target.value)}
+                onChange={(e) => {
+                  setSenha(e.target.value);
+                  if (e.target.value.trim().length >= 8 && e.target.value.trim().length <= 20) {
+                    setFormErrors(errors => ({ ...errors, senha: undefined }));
+                  }
+                }}
                 size="small"
                 className="col-span-2"
                 id="agent-field-senha"
-                helperText="Esta senha padrão será fornecida para o primeiro acesso do agente no aplicativo móvel"
+                type="password"
+                error={Boolean(formErrors.senha)}
+                helperText={formErrors.senha || 'Use entre 8 e 20 caracteres. Esta senha será fornecida para o primeiro acesso do agente no aplicativo móvel.'}
               />
             )}
 
-            <FormControl fullWidth size="small" required disabled={isAdmin}>
+            <FormControl fullWidth size="small" required disabled={isAdmin} error={Boolean(formErrors.municipioId)}>
               <InputLabel id="agent-muni-label">Município</InputLabel>
               <Select
                 labelId="agent-muni-label"
@@ -617,9 +644,8 @@ export default function Agentes() {
                 label="Município"
                 onChange={(e) => {
                   setMunicipioId(e.target.value);
-                  // Auto-set matching market if relevant
-                  const match = mercados.find(m => m.municipioId === e.target.value);
-                  if (match) setMercadoId(match.id);
+                  if (e.target.value) setFormErrors(errors => ({ ...errors, municipioId: undefined }));
+                  setMercadoId('');
                 }}
                 id="agent-field-muni"
               >
@@ -635,34 +661,39 @@ export default function Agentes() {
                   ))
                 )}
               </Select>
+              {formErrors.municipioId && <FormHelperText>{formErrors.municipioId}</FormHelperText>}
             </FormControl>
 
-            <FormControl fullWidth size="small" required>
+            <FormControl fullWidth size="small" required error={Boolean(formErrors.mercadoId)}>
               <InputLabel id="agent-merc-label">Mercado Afetado</InputLabel>
               <Select
                 labelId="agent-merc-label"
                 value={mercadoId}
                 label="Mercado Afetado"
-                onChange={(e) => setMercadoId(e.target.value)}
+                onChange={(e) => {
+                  setMercadoId(e.target.value);
+                  if (e.target.value) setFormErrors(errors => ({ ...errors, mercadoId: undefined }));
+                }}
                 id="agent-field-merc"
               >
                 {allowedMercados.map(m => (
                   <MenuItem key={m.id} value={m.id}>{m.nome}</MenuItem>
                 ))}
               </Select>
+              {formErrors.mercadoId && <FormHelperText>{formErrors.mercadoId}</FormHelperText>}
             </FormControl>
 
             <TextField
               label={`Meta Diária de Cobrança (${configuracoes.moeda})`}
               type="number"
               fullWidth
-              value={metaDiaria}
-              onChange={(e) => setMetaDiaria(Math.max(0, Number(e.target.value)))}
+              value={configuracoes.metaDiariaAgente ?? 100000}
               size="small"
               className="col-span-2"
               id="agent-field-meta-diaria"
               slotProps={{
                 input: {
+                  readOnly: true,
                   startAdornment: (
                     <InputAdornment position="start">
                       <Target size={16} className="text-blue-600" />
@@ -675,16 +706,20 @@ export default function Agentes() {
                   )
                 }
               }}
-              helperText="Introduza o valor numérico da meta individual de arrecadação diária deste agente."
+              helperText="Meta geral definida em Configurações. Para alterá-la, atualize a configuração do sistema."
             />
 
-            <FormControl fullWidth size="small" className="col-span-2">
+            <FormControl fullWidth size="small" className="col-span-2" error={Boolean(formErrors.permissoes)} required>
               <InputLabel id="permissions-label">Permissões de Cobrança</InputLabel>
               <Select
                 labelId="permissions-label"
                 multiple
                 value={permissoes}
-                onChange={(e) => setPermissoes(typeof e.target.value === 'string' ? e.target.value.split(',') : e.target.value)}
+                onChange={(e) => {
+                  const selected = typeof e.target.value === 'string' ? e.target.value.split(',') : e.target.value;
+                  setPermissoes(selected);
+                  if (selected.length > 0) setFormErrors(errors => ({ ...errors, permissoes: undefined }));
+                }}
                 input={<OutlinedInput label="Permissões de Cobrança" />}
                 renderValue={(selected) => (
                   <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
@@ -702,6 +737,9 @@ export default function Agentes() {
                   </MenuItem>
                 ))}
               </Select>
+              <FormHelperText>
+                {formErrors.permissoes || 'Nenhuma vem selecionada. Cobrar e Offline são aplicadas pela API; Impressão, Isenção e Reemissão ainda não têm operações correspondentes.'}
+              </FormHelperText>
             </FormControl>
 
             <FormControl fullWidth size="small" className="col-span-2">
@@ -722,106 +760,6 @@ export default function Agentes() {
         <DialogActions sx={{ px: 3, py: 2 }}>
           <Button onClick={() => setOpenDialog(false)} color="inherit">Cancelar</Button>
           <Button onClick={handleSave} variant="contained" id="btn-save-agent">Salvar Cadastro</Button>
-        </DialogActions>
-      </Dialog>
-
-      {/* Quick Target Adjustment Dialog */}
-      <Dialog 
-        open={openTargetDialog} 
-        onClose={() => {
-          setOpenTargetDialog(false);
-          setTargetAgente(null);
-        }}
-        maxWidth="xs"
-        fullWidth
-      >
-        <DialogTitle sx={{ fontWeight: 700, display: 'flex', alignItems: 'center', gap: 1 }}>
-          <Target size={18} className="text-blue-600" />
-          <span>Definir Meta Diária de Cobrança</span>
-        </DialogTitle>
-        <DialogContent dividers>
-          {targetAgente && (
-            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2.5, pt: 1 }}>
-              <Box sx={{ p: 1.5, bgcolor: 'action.hover', borderRadius: 1.5, border: '1px solid', borderColor: 'divider' }}>
-                <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
-                  {targetAgente.nome}
-                </Typography>
-                <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block' }}>
-                  Usuário: <span className="font-mono">{targetAgente.usuario}</span> • {targetAgente.cargo}
-                </Typography>
-              </Box>
-
-              <div>
-                <Typography variant="body2" sx={{ mb: 1, fontWeight: 500 }}>
-                  Introduza o valor da meta diária ({configuracoes.moeda}):
-                </Typography>
-                <TextField
-                  autoFocus
-                  type="number"
-                  fullWidth
-                  value={targetGoalValue}
-                  onChange={(e) => setTargetGoalValue(e.target.value)}
-                  placeholder="Ex: 100000"
-                  size="small"
-                  id="field-quick-meta-diaria"
-                  slotProps={{
-                    input: {
-                      startAdornment: (
-                        <InputAdornment position="start">
-                          <Target size={16} className="text-blue-600" />
-                        </InputAdornment>
-                      ),
-                      endAdornment: (
-                        <InputAdornment position="end">
-                          <span className="text-xs font-bold text-slate-600 dark:text-slate-300">{configuracoes.moeda}</span>
-                        </InputAdornment>
-                      )
-                    }
-                  }}
-                  helperText="Digite diretamente qualquer quantia desejada para a meta de arrecadação do agente."
-                />
-              </div>
-
-              <div>
-                <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', mb: 1 }}>
-                  Atalhos rápidos para valores comuns:
-                </Typography>
-                <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-                  {[50000, 100000, 150000, 200000, 500000].map((val) => (
-                    <Chip
-                      key={val}
-                      label={`${(val / 1000).toFixed(0)}k ${configuracoes.moeda}`}
-                      size="small"
-                      clickable
-                      variant={Number(targetGoalValue) === val ? 'filled' : 'outlined'}
-                      color={Number(targetGoalValue) === val ? 'primary' : 'default'}
-                      onClick={() => setTargetGoalValue(val)}
-                      sx={{ fontSize: '11px', fontWeight: 600 }}
-                    />
-                  ))}
-                </Box>
-              </div>
-            </Box>
-          )}
-        </DialogContent>
-        <DialogActions sx={{ px: 3, py: 2 }}>
-          <Button 
-            onClick={() => {
-              setOpenTargetDialog(false);
-              setTargetAgente(null);
-            }} 
-            color="inherit"
-          >
-            Cancelar
-          </Button>
-          <Button 
-            onClick={handleSaveQuickGoal} 
-            variant="contained" 
-            color="primary"
-            id="btn-save-quick-meta"
-          >
-            Salvar Meta
-          </Button>
         </DialogActions>
       </Dialog>
 

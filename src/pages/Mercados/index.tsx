@@ -5,7 +5,7 @@ import { Plus, Edit2, Trash2, Search, MapPin, RefreshCw, FileSpreadsheet, Printe
 import { 
   Box, Typography, Button, TextField, Table, TableBody, TableCell, 
   TableContainer, TableHead, TableRow, Paper, Dialog, DialogTitle, 
-  DialogContent, DialogActions, Chip, FormControl, Select, MenuItem, InputLabel,
+  DialogContent, DialogActions, Chip, FormControl, FormHelperText, Select, MenuItem, InputLabel,
   TablePagination
 } from '@mui/material';
 import { exportToExcel, printToPDF } from '../../utils/export';
@@ -49,6 +49,12 @@ export default function Mercados() {
   const [responsavel, setResponsavel] = useState('');
   const [telefone, setTelefone] = useState('');
   const [status, setStatus] = useState<'ativo' | 'inativo'>('ativo');
+  const [formErrors, setFormErrors] = useState<{
+    nome?: string;
+    municipioId?: string;
+    responsavel?: string;
+    qtdBancas?: string;
+  }>({});
 
   const filtered = mercados.filter(m => {
     if (isAdmin && m.municipioId !== userMuniId) {
@@ -66,6 +72,7 @@ export default function Mercados() {
 
   const handleOpenAdd = () => {
     setEditingItem(null);
+    setFormErrors({});
     setNome('');
     setMunicipioId(isAdmin ? userMuniId : (municipios[0]?.id || ''));
     setLat(11.8598);
@@ -80,6 +87,7 @@ export default function Mercados() {
 
   const handleOpenEdit = (item: Mercado) => {
     setEditingItem(item);
+    setFormErrors({});
     setNome(item.nome);
     setMunicipioId(item.municipioId);
     setLat(item.localizacaoGps.lat);
@@ -92,12 +100,20 @@ export default function Mercados() {
     setOpenDialog(true);
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     const targetMuniId = isAdmin ? userMuniId : municipioId;
-    if (!nome.trim() || !targetMuniId || !responsavel.trim()) {
+    const validationErrors: typeof formErrors = {};
+    if (!nome.trim()) validationErrors.nome = 'Informe o nome do mercado.';
+    if (!targetMuniId) validationErrors.municipioId = 'Selecione o município.';
+    if (!responsavel.trim()) validationErrors.responsavel = 'Informe o responsável.';
+    if (!Number.isSafeInteger(Number(qtdBancas)) || Number(qtdBancas) <= 0) {
+      validationErrors.qtdBancas = 'Informe uma quantidade de bancas superior a zero.';
+    }
+    setFormErrors(validationErrors);
+    if (Object.keys(validationErrors).length > 0) {
       addNotification({
         title: 'Campos Obrigatórios',
-        message: 'Por favor, preencha os campos obrigatórios (Nome, Município e Responsável).',
+        message: 'Preencha os campos obrigatórios assinalados a vermelho.',
         type: 'warning'
       });
       return;
@@ -121,7 +137,16 @@ export default function Mercados() {
         type: 'success'
       });
     } else {
-      addMercado(payload);
+      try {
+        await addMercado(payload);
+      } catch (error) {
+        addNotification({
+          title: 'Impossível registar mercado',
+          message: error instanceof Error ? error.message : 'Não foi possível comunicar com o servidor. Tente novamente.',
+          type: 'warning',
+        });
+        return;
+      }
       addNotification({
         title: 'Mercado Cadastrado',
         message: `O mercado "${nome}" foi cadastrado com sucesso.`,
@@ -362,19 +387,27 @@ export default function Mercados() {
               label="Nome do Mercado"
               fullWidth
               value={nome}
-              onChange={(e) => setNome(e.target.value)}
+              onChange={(e) => {
+                setNome(e.target.value);
+                if (e.target.value.trim()) setFormErrors(errors => ({ ...errors, nome: undefined }));
+              }}
               size="small"
               className="col-span-2"
               id="merc-field-nome"
+              error={Boolean(formErrors.nome)}
+              helperText={formErrors.nome}
             />
             
-            <FormControl fullWidth size="small" required disabled={isAdmin}>
+            <FormControl fullWidth size="small" required disabled={isAdmin} error={Boolean(formErrors.municipioId)}>
               <InputLabel id="muni-label">Município Atribuído</InputLabel>
               <Select
                 labelId="muni-label"
                 value={isAdmin ? (currentUser?.municipioId || '') : municipioId}
                 label="Município Atribuído"
-                onChange={(e) => setMunicipioId(e.target.value)}
+                onChange={(e) => {
+                  setMunicipioId(e.target.value);
+                  if (e.target.value) setFormErrors(errors => ({ ...errors, municipioId: undefined }));
+                }}
                 id="merc-field-muni"
               >
                 {isAdmin ? (
@@ -389,6 +422,7 @@ export default function Mercados() {
                   ))
                 )}
               </Select>
+              {formErrors.municipioId && <FormHelperText>{formErrors.municipioId}</FormHelperText>}
             </FormControl>
 
             <TextField
@@ -397,9 +431,17 @@ export default function Mercados() {
               type="number"
               fullWidth
               value={qtdBancas}
-              onChange={(e) => setQtdBancas(Number(e.target.value))}
+              onChange={(e) => {
+                const value = Number(e.target.value);
+                setQtdBancas(value);
+                if (Number.isSafeInteger(value) && value > 0) {
+                  setFormErrors(errors => ({ ...errors, qtdBancas: undefined }));
+                }
+              }}
               size="small"
               id="merc-field-bancas"
+              error={Boolean(formErrors.qtdBancas)}
+              helperText={formErrors.qtdBancas}
             />
 
             <TextField
@@ -407,10 +449,15 @@ export default function Mercados() {
               label="Nome do Responsável / Administrador"
               fullWidth
               value={responsavel}
-              onChange={(e) => setResponsavel(e.target.value)}
+              onChange={(e) => {
+                setResponsavel(e.target.value);
+                if (e.target.value.trim()) setFormErrors(errors => ({ ...errors, responsavel: undefined }));
+              }}
               size="small"
               className="col-span-2"
               id="merc-field-responsavel"
+              error={Boolean(formErrors.responsavel)}
+              helperText={formErrors.responsavel}
             />
 
             <TextField

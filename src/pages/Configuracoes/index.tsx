@@ -88,6 +88,11 @@ export default function Configuracoes() {
   const [devMunicipioId, setDevMunicipioId] = useState('');
   const [devModelo, setDevModelo] = useState('Sunmi V2 Pro (Android 11)');
   const [devImpressoraTermica, setDevImpressoraTermica] = useState(true);
+  const [deviceFormErrors, setDeviceFormErrors] = useState<{
+    codigo?: string;
+    nome?: string;
+    imeiUuid?: string;
+  }>({});
 
   // Modal State for QR Code Activation
   const [openQrModal, setOpenQrModal] = useState(false);
@@ -264,8 +269,17 @@ export default function Configuracoes() {
   };
 
   const handleAddDeviceSubmit = async () => {
-    if (!devCodigo || !devNome || !devImeiUuid) {
-      alert('Por favor preencha os campos obrigatórios (Código, Nome do Aparelho e IMEI/UUID).');
+    const validationErrors: typeof deviceFormErrors = {};
+    if (!devCodigo.trim()) validationErrors.codigo = 'Informe o código do terminal.';
+    if (!devNome.trim()) validationErrors.nome = 'Informe o nome do aparelho.';
+    if (!devImeiUuid.trim()) validationErrors.imeiUuid = 'Informe o IMEI/UUID do aparelho.';
+    setDeviceFormErrors(validationErrors);
+    if (Object.keys(validationErrors).length > 0) {
+      addNotification({
+        title: 'Verifique os campos obrigatórios',
+        message: 'Corrija os campos assinalados a vermelho antes de autorizar o dispositivo.',
+        type: 'warning',
+      });
       return;
     }
 
@@ -274,9 +288,9 @@ export default function Configuracoes() {
 
     const newDev: Dispositivo = {
       id: `dev-${Date.now()}`,
-      codigo: devCodigo,
-      nome: devNome,
-      imeiUuid: devImeiUuid,
+      codigo: devCodigo.trim(),
+      nome: devNome.trim(),
+      imeiUuid: devImeiUuid.trim(),
       agenteId: devAgenteId,
       agenteNome: ag ? ag.nome : 'Sem Agente Fixo',
       municipioId: devMunicipioId || ag?.municipioId,
@@ -304,6 +318,7 @@ export default function Configuracoes() {
     setDevImeiUuid('');
     setDevAgenteId('');
     setDevMunicipioId('');
+    setDeviceFormErrors({});
   };
 
   const handleOpenResetModal = (level: 'pagamentos' | 'despesas' | 'agentes' | 'contribuintes' | 'mercados' | 'municipios' | 'tipos_receita' | 'auditoria' | 'all', label: string) => {
@@ -1069,7 +1084,10 @@ export default function Configuracoes() {
                 variant="contained"
                 color="primary"
                 startIcon={<PlusCircle size={16} />}
-                onClick={() => setOpenDeviceModal(true)}
+                onClick={() => {
+                  setDeviceFormErrors({});
+                  setOpenDeviceModal(true);
+                }}
                 id="btn-add-device"
                 sx={{ textTransform: 'none', fontWeight: 700 }}
               >
@@ -1619,7 +1637,12 @@ export default function Configuracoes() {
               fullWidth
               placeholder="ex: POS-BISSAU-005"
               value={devCodigo}
-              onChange={(e) => setDevCodigo(e.target.value)}
+              onChange={(e) => {
+                setDevCodigo(e.target.value);
+                if (e.target.value.trim()) setDeviceFormErrors(errors => ({ ...errors, codigo: undefined }));
+              }}
+              error={Boolean(deviceFormErrors.codigo)}
+              helperText={deviceFormErrors.codigo}
             />
 
             <TextField
@@ -1629,7 +1652,12 @@ export default function Configuracoes() {
               fullWidth
               placeholder="ex: Terminal Sunmi V2 Pro - Agente Bissau"
               value={devNome}
-              onChange={(e) => setDevNome(e.target.value)}
+              onChange={(e) => {
+                setDevNome(e.target.value);
+                if (e.target.value.trim()) setDeviceFormErrors(errors => ({ ...errors, nome: undefined }));
+              }}
+              error={Boolean(deviceFormErrors.nome)}
+              helperText={deviceFormErrors.nome}
             />
 
             <TextField
@@ -1639,7 +1667,12 @@ export default function Configuracoes() {
               fullWidth
               placeholder="ex: 864201048291039"
               value={devImeiUuid}
-              onChange={(e) => setDevImeiUuid(e.target.value)}
+              onChange={(e) => {
+                setDevImeiUuid(e.target.value);
+                if (e.target.value.trim()) setDeviceFormErrors(errors => ({ ...errors, imeiUuid: undefined }));
+              }}
+              error={Boolean(deviceFormErrors.imeiUuid)}
+              helperText={deviceFormErrors.imeiUuid}
             />
 
             <FormControl size="small" fullWidth>

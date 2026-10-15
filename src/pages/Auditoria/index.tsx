@@ -138,6 +138,7 @@ export default function Auditoria() {
               <MenuItem value="reimpressao">Reimpressões Térmicas</MenuItem>
               <MenuItem value="sincronizacao">Sincronizações Offline</MenuItem>
               <MenuItem value="backup">Backups da Base de Dados</MenuItem>
+              <MenuItem value="restore">Restauros da Base de Dados</MenuItem>
             </Select>
           </FormControl>
         </div>

@@ -43,6 +43,7 @@ export default function TiposReceita() {
   const [valor, setValor] = useState<number>(500);
   const [periodicidade, setPeriodicidade] = useState<PeriodicidadeTaxa>('Diária');
   const [status, setStatus] = useState<'ativo' | 'inativo'>('ativo');
+  const [formErrors, setFormErrors] = useState<{ nome?: string; valor?: string }>({});
 
   const filtered = tiposReceita.filter(t => 
     t.nome.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -64,6 +65,7 @@ export default function TiposReceita() {
     setValor(500);
     setPeriodicidade('Diária');
     setStatus('ativo');
+    setFormErrors({});
     setOpenDialog(true);
   };
 
@@ -74,21 +76,39 @@ export default function TiposReceita() {
     setValor(item.valor);
     setPeriodicidade(item.periodicidade);
     setStatus(item.status);
+    setFormErrors({});
     setOpenDialog(true);
   };
 
-  const handleSave = () => {
-    if (!nome || !valor) {
-      alert('Por favor, preencha os campos obrigatórios (Nome e Valor)');
+  const handleSave = async () => {
+    const validationErrors: typeof formErrors = {};
+    if (!nome.trim()) validationErrors.nome = 'Informe o nome da taxa.';
+    if (!Number.isFinite(Number(valor)) || Number(valor) <= 0) validationErrors.valor = 'Informe um valor superior a zero.';
+    setFormErrors(validationErrors);
+    if (Object.keys(validationErrors).length > 0) {
+      addNotification({
+        title: 'Verifique os campos obrigatórios',
+        message: 'Corrija os campos assinalados a vermelho antes de guardar.',
+        type: 'warning',
+      });
       return;
     }
 
-    const payload = { nome, descricao, valor: Number(valor), periodicidade, status };
+    const payload = { nome: nome.trim(), descricao: descricao.trim(), valor: Number(valor), periodicidade, status };
 
     if (editingItem) {
       updateTipoReceita(editingItem.id, payload);
     } else {
-      addTipoReceita(payload);
+      try {
+        await addTipoReceita(payload);
+      } catch (error) {
+        addNotification({
+          title: 'Impossível registar tipo de receita',
+          message: error instanceof Error ? error.message : 'Não foi possível comunicar com o servidor. Tente novamente.',
+          type: 'warning',
+        });
+        return;
+      }
     }
     setOpenDialog(false);
   };
@@ -304,10 +324,15 @@ export default function TiposReceita() {
               label="Nome da Taxa / Tributo"
               fullWidth
               value={nome}
-              onChange={(e) => setNome(e.target.value)}
+              onChange={(e) => {
+                setNome(e.target.value);
+                if (e.target.value.trim()) setFormErrors(errors => ({ ...errors, nome: undefined }));
+              }}
               size="small"
               className="col-span-2"
               id="tax-field-nome"
+              error={Boolean(formErrors.nome)}
+              helperText={formErrors.nome}
             />
             
             <TextField
@@ -328,9 +353,14 @@ export default function TiposReceita() {
               currencySymbol={configuracoes.moeda}
               fullWidth
               value={valor}
-              onChange={(val) => setValor(val)}
+              onChange={(val) => {
+                setValor(val);
+                if (val > 0) setFormErrors(errors => ({ ...errors, valor: undefined }));
+              }}
               size="small"
               id="tax-field-valor"
+              error={Boolean(formErrors.valor)}
+              helperText={formErrors.valor}
             />
 
             <FormControl fullWidth size="small" required>

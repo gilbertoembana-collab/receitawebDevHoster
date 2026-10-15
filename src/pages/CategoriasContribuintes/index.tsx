@@ -19,10 +19,12 @@ export default function CategoriasContribuintes() {
   const [nome, setNome] = useState('');
   const [descricao, setDescricao] = useState('');
   const [isSaving, setIsSaving] = useState(false);
+  const [nomeError, setNomeError] = useState('');
   const canManage = MANAGER_ROLES.includes(activeProfile);
 
   const openNew = () => {
     setEditing(null);
+    setNomeError('');
     setNome('');
     setDescricao('');
     setOpen(true);
@@ -30,6 +32,7 @@ export default function CategoriasContribuintes() {
 
   const openEdit = (category: CategoriaContribuinte) => {
     setEditing(category);
+    setNomeError('');
     setNome(category.nome);
     setDescricao(category.descricao);
     setOpen(true);
@@ -38,9 +41,11 @@ export default function CategoriasContribuintes() {
   const saveCategory = async () => {
     const normalizedName = nome.trim();
     if (!normalizedName) {
-      addNotification({ title: 'Campo obrigatório', message: 'Informe o nome da categoria.', type: 'warning' });
+      setNomeError('Informe o nome da categoria.');
+      addNotification({ title: 'Campo obrigatório', message: 'Corrija o campo assinalado a vermelho.', type: 'warning' });
       return;
     }
+    setNomeError('');
 
     setIsSaving(true);
     try {
@@ -72,7 +77,9 @@ export default function CategoriasContribuintes() {
     } catch (error) {
       addNotification({
         title: 'Erro ao guardar categoria',
-        message: error instanceof Error ? error.message : 'Não foi possível comunicar com o servidor.',
+        message: error instanceof Error
+          ? `Não foi possível registar a categoria: ${error.message}`
+          : 'Não foi possível registar a categoria. Verifique a ligação à rede e tente novamente.',
         type: 'warning',
       });
     } finally {
@@ -184,8 +191,13 @@ export default function CategoriasContribuintes() {
               autoFocus
               label="Nome da Categoria"
               value={nome}
-              onChange={event => setNome(event.target.value)}
+              onChange={event => {
+                setNome(event.target.value);
+                if (event.target.value.trim()) setNomeError('');
+              }}
               slotProps={{ htmlInput: { maxLength: 100 } }}
+              error={Boolean(nomeError)}
+              helperText={nomeError}
             />
             <TextField
               label="Descrição"

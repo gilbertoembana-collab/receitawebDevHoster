@@ -51,19 +51,19 @@ interface AppStore {
   clearNotifications: () => void;
 
   // CRUD Operations linking back to dbService
-  addUsuario: (item: Omit<Usuario, 'id'>) => void;
+  addUsuario: (item: Omit<Usuario, 'id'>) => Promise<void>;
   updateUsuario: (id: string, updates: Partial<Usuario>) => void;
   deleteUsuario: (id: string) => void;
 
-  addMunicipio: (item: Omit<Municipio, 'id'>) => void;
+  addMunicipio: (item: Omit<Municipio, 'id'>) => Promise<void>;
   updateMunicipio: (id: string, updates: Partial<Municipio>) => void;
   deleteMunicipio: (id: string) => void;
 
-  addMercado: (item: Omit<Mercado, 'id'>) => void;
+  addMercado: (item: Omit<Mercado, 'id'>) => Promise<void>;
   updateMercado: (id: string, updates: Partial<Mercado>) => void;
   deleteMercado: (id: string) => void;
 
-  addAgente: (item: Omit<Agente, 'id'>) => void;
+  addAgente: (item: Omit<Agente, 'id'>) => Promise<void>;
   updateAgente: (id: string, updates: Partial<Agente>) => void;
   deleteAgente: (id: string) => void;
 
@@ -71,14 +71,14 @@ interface AppStore {
   loadContributorsPage: (page: number, search?: string) => Promise<{ items: Contribuinte[]; total: number }>;
   updateContribuinte: (id: string, updates: Partial<Contribuinte>) => Promise<Contribuinte>;
 
-  addCategoriaContribuinte: (item: Omit<CategoriaContribuinte, 'id'>) => void;
+  addCategoriaContribuinte: (item: Omit<CategoriaContribuinte, 'id'>) => Promise<void>;
   updateCategoriaContribuinte: (id: string, updates: Partial<CategoriaContribuinte>) => void;
 
-  addTipoReceita: (item: Omit<TipoReceita, 'id'>) => void;
+  addTipoReceita: (item: Omit<TipoReceita, 'id'>) => Promise<void>;
   updateTipoReceita: (id: string, updates: Partial<TipoReceita>) => void;
   deleteTipoReceita: (id: string) => void;
 
-  addPagamento: (item: Omit<Pagamento, 'id'>) => void;
+  addPagamento: (item: Omit<Pagamento, 'id'>) => Promise<void>;
   updatePagamento: (id: string, updates: Partial<Pagamento>) => void;
   approveCancellation: (id: string) => void;
   cancelPayment: (id: string, reason: string) => void;
@@ -239,7 +239,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     clearNotifications: () => set({ notifications: [] }),
 
     // CRUD Municipios
-    addMunicipio: (item) => dbService.addDocument('municipios', item),
+    addMunicipio: async (item) => { await dbService.addDocument('municipios', item); },
     updateMunicipio: (id, updates) => dbService.updateDocument('municipios', id, updates),
     deleteMunicipio: (id) => {
       const { currentUser, activeProfile, agentes } = get();
@@ -264,7 +264,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     },
 
     // CRUD Mercados
-    addMercado: (item) => dbService.addDocument('mercados', item),
+    addMercado: async (item) => { await dbService.addDocument('mercados', item); },
     updateMercado: (id, updates) => dbService.updateDocument('mercados', id, updates),
     deleteMercado: (id) => {
       const { currentUser, activeProfile, pagamentos } = get();
@@ -289,7 +289,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     },
 
     // CRUD Agentes
-    addAgente: (item) => dbService.addDocument('agentes', item),
+    addAgente: async (item) => { await dbService.addDocument('agentes', item); },
     updateAgente: (id, updates) => dbService.updateDocument('agentes', id, updates),
     deleteAgente: (id) => {
       const { currentUser, activeProfile, pagamentos } = get();
@@ -319,11 +319,11 @@ export const useAppStore = create<AppStore>((set, get) => {
     updateContribuinte: (id, updates) => dbService.updateContributor(id, updates),
 
     // Contributor categories
-    addCategoriaContribuinte: (item) => dbService.addDocument('categoria_contribuintes', item),
+    addCategoriaContribuinte: async (item) => { await dbService.addDocument('categoria_contribuintes', item); },
     updateCategoriaContribuinte: (id, updates) => dbService.updateDocument('categoria_contribuintes', id, updates),
 
     // CRUD TiposReceita
-    addTipoReceita: (item) => dbService.addDocument('tipos_receita', item),
+    addTipoReceita: async (item) => { await dbService.addDocument('tipos_receita', item); },
     updateTipoReceita: (id, updates) => dbService.updateDocument('tipos_receita', id, updates),
     deleteTipoReceita: (id) => {
       const { currentUser, activeProfile } = get();
@@ -339,7 +339,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     },
 
     // Payments / Collections Actions
-    addPagamento: (item) => dbService.addDocument('pagamentos', item),
+    addPagamento: async (item) => { await dbService.addDocument('pagamentos', item); },
     updatePagamento: (id, updates) => dbService.updateDocument('pagamentos', id, updates),
     approveCancellation: (id) => {
       const { pagamentos, currentUser } = get();
@@ -392,7 +392,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     },
 
     // CRUD Usuarios
-    addUsuario: (item) => dbService.addDocument('usuarios', item),
+    addUsuario: async (item) => { await dbService.addDocument('usuarios', item); },
     updateUsuario: (id, updates) => dbService.updateDocument('usuarios', id, updates),
     deleteUsuario: (id) => {
       const { currentUser, activeProfile } = get();

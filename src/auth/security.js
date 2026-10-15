@@ -10,6 +10,7 @@ const REFRESH_COOKIE_PATH = '/api';
 const LEGACY_REFRESH_COOKIE_PATHS = ['/api/auth', '/api/v1/auth'];
 const ISSUER = 'receita360-api';
 const AUDIENCE = 'receita360-clients';
+const AGENT_PERMISSIONS = new Set(['Cobrar', 'Imprimir Recibo', 'Offline', 'Aprovar Isenção', 'Reemitir']);
 const ARGON_OPTIONS = {
   algorithm: Algorithm.Argon2id,
   memoryCost: 19456,
@@ -81,9 +82,21 @@ function isArgonHash(value) {
   return typeof value === 'string' && value.startsWith('$argon2id$');
 }
 
-export async function hashPassword(password, { minimumLength = 12 } = {}) {
-  if (typeof password !== 'string' || password.length < minimumLength || password.length > 128) {
-    throw new Error('A senha deve ter entre 12 e 128 caracteres.');
+export function normalizeAgentPermissions(value) {
+  const permissions = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? value.split(',')
+      : null;
+  if (!permissions || permissions.length === 0) return null;
+  const normalized = permissions.map(permission => typeof permission === 'string' ? permission.trim() : '');
+  if (normalized.some(permission => !AGENT_PERMISSIONS.has(permission))) return null;
+  return [...new Set(normalized)];
+}
+
+export async function hashPassword(password, { minimumLength = 8, maximumLength = 20 } = {}) {
+  if (typeof password !== 'string' || password.length < minimumLength || password.length > maximumLength) {
+    throw new Error(`A senha deve ter entre ${minimumLength} e ${maximumLength} caracteres.`);
   }
   return hash(password, ARGON_OPTIONS);
 }
@@ -124,7 +137,7 @@ export async function migratePlaintextPasswords(queryable) {
     for (const row of result.rows) {
       if (isArgonHash(row.credential) || /^[a-f0-9]{64}$/i.test(row.credential)) continue;
       const normalized = normalize(row.credential) || row.credential;
-      const encoded = await hashPassword(normalized, { minimumLength: 1 });
+      const encoded = await hashPassword(normalized, { minimumLength: 1, maximumLength: 128 });
       await queryable.query(
         `UPDATE ${table} SET ${column} = $1 WHERE id = $2 AND ${column} = $3`,
         [encoded, row.id, row.credential],
@@ -453,6 +466,11 @@ export function createAuthSecurity(pool) {
       const isOwnProfileRead = method === 'GET' && path === '/api/auth/me';
       const isContributorStatusUpdate = method === 'PUT' && /^\/api\/contribuintes\/[^/]+$/.test(path);
       const isAllowedRead = method === 'GET' && AGENT_READ_PATHS.has(path);
+      const requiredPermission = method === 'POST' && path === '/api/pagamentos'
+        ? 'Cobrar'
+        : method === 'POST' && path === '/api/sincronizacao'
+          ? 'Offline'
+          : null;
       const isAllowedWrite = method === 'POST' && (
         path === '/api/pagamentos' || path === '/api/auditoria' || path === '/api/sincronizacao'
       );
@@ -481,6 +499,21 @@ export function createAuthSecurity(pool) {
           }
           return next();
         }).catch(() => res.status(500).json({ error: 'Não foi possível validar o contribuinte.' }));
+        return;
+      }
+      if (requiredPermission) {
+        pool.query('SELECT permissoes FROM agentes WHERE id = $1', [req.auth.id])
+          .then(result => {
+            const permissions = normalizeAgentPermissions(result.rows[0]?.permissoes);
+            if (!permissions?.includes(requiredPermission)) {
+              return res.status(403).json({ error: `Permissão "${requiredPermission}" não concedida ao agente.` });
+            }
+            return next();
+          })
+          .catch(error => {
+            console.error('Agent permission lookup failed:', error);
+            res.status(500).json({ error: 'Não foi possível validar as permissões do agente.' });
+          });
         return;
       }
       if (!isSelfPasswordChange && !isOwnProfileRead && !isAllowedRead && !isAllowedWrite) {

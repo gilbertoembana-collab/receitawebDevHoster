@@ -9,7 +9,7 @@ import {
   Box, Typography, Button, TextField, Table, TableBody, TableCell, 
   TableContainer, TableHead, TableRow, Paper, Dialog, DialogTitle, 
   DialogContent, DialogActions, Chip, FormControl, Select, MenuItem, 
-  InputLabel, TablePagination, Card, CardContent, Divider, Alert, Tooltip
+  InputLabel, FormHelperText, TablePagination, Card, CardContent, Divider, Alert, Tooltip
 } from '@mui/material';
 
 export default function Usuarios() {
@@ -48,6 +48,7 @@ export default function Usuarios() {
   const [perfil, setPerfil] = useState<UserProfile>('Supervisor');
   const [municipioId, setMunicipioId] = useState<string>('');
   const [status, setStatus] = useState<'ativo' | 'inativo'>('ativo');
+  const [formErrors, setFormErrors] = useState<{ nome?: string; email?: string; usuario?: string; senha?: string }>({});
 
   const handleRefresh = () => {
     setIsRefreshing(true);
@@ -108,6 +109,7 @@ export default function Usuarios() {
 
   const handleOpenAdd = () => {
     setEditingItem(null);
+    setFormErrors({});
     setNome('');
     setEmail('');
     setUsuario('');
@@ -120,6 +122,7 @@ export default function Usuarios() {
 
   const handleOpenEdit = (item: Usuario) => {
     setEditingItem(item);
+    setFormErrors({});
     setNome(item.nome);
     setEmail(item.email);
     setUsuario(item.usuario || '');
@@ -132,8 +135,22 @@ export default function Usuarios() {
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!nome.trim() || !email.trim()) {
-      alert('Por favor, preencha todos os campos obrigatórios.');
+    const validationErrors: typeof formErrors = {};
+    if (!nome.trim()) validationErrors.nome = 'Informe o nome completo.';
+    if (!email.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+      validationErrors.email = 'Informe um endereço de e-mail válido.';
+    }
+    if (!usuario.trim()) validationErrors.usuario = 'Informe o nome de utilizador/login.';
+    if ((!editingItem || senha.trim()) && (senha.trim().length < 8 || senha.trim().length > 20)) {
+      validationErrors.senha = 'A senha deve ter entre 8 e 20 caracteres.';
+    }
+    setFormErrors(validationErrors);
+    if (Object.keys(validationErrors).length > 0) {
+      addNotification({
+        title: 'Verifique os campos obrigatórios',
+        message: 'Corrija os campos assinalados a vermelho antes de guardar.',
+        type: 'warning',
+      });
       return;
     }
 
@@ -167,8 +184,12 @@ export default function Usuarios() {
         });
       }
       setOpenDialog(false);
-    } catch (err: any) {
-      alert('Erro ao guardar utilizador: ' + err.message);
+    } catch (err: unknown) {
+      addNotification({
+        title: 'Impossível registar utilizador',
+        message: err instanceof Error ? err.message : 'Não foi possível comunicar com o servidor. Tente novamente.',
+        type: 'warning',
+      });
     }
   };
 
@@ -506,7 +527,7 @@ export default function Usuarios() {
         <DialogTitle sx={{ fontWeight: 'bold' }}>
           {editingItem ? 'Editar Utilizador' : 'Adicionar Novo Utilizador'}
         </DialogTitle>
-        <form onSubmit={handleSave}>
+        <form onSubmit={handleSave} noValidate>
           <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 3, pt: 1 }}>
             {/* Name */}
             <TextField
@@ -515,9 +536,14 @@ export default function Usuarios() {
               fullWidth
               size="small"
               value={nome}
-              onChange={(e) => setNome(e.target.value)}
+              onChange={(e) => {
+                setNome(e.target.value);
+                if (e.target.value.trim()) setFormErrors(errors => ({ ...errors, nome: undefined }));
+              }}
               placeholder="Ex: João Baptista da Silva"
               id="user-form-name"
+              error={Boolean(formErrors.nome)}
+              helperText={formErrors.nome}
             />
 
             {/* Email */}
@@ -528,11 +554,17 @@ export default function Usuarios() {
               fullWidth
               size="small"
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(e) => {
+                setEmail(e.target.value);
+                if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e.target.value.trim())) {
+                  setFormErrors(errors => ({ ...errors, email: undefined }));
+                }
+              }}
               placeholder="Ex: joao.silva@receita360.gw"
               disabled={!!editingItem} // Prevent email update for identity safety
-              helperText={editingItem ? "O e-mail é utilizado como identificador exclusivo e não pode ser alterado." : "Será utilizado para autenticação no painel administrativo."}
+              helperText={formErrors.email || (editingItem ? "O e-mail é utilizado como identificador exclusivo e não pode ser alterado." : "Será utilizado para autenticação no painel administrativo.")}
               id="user-form-email"
+              error={Boolean(formErrors.email)}
             />
 
             {/* Login / Username */}
@@ -542,10 +574,15 @@ export default function Usuarios() {
               fullWidth
               size="small"
               value={usuario}
-              onChange={(e) => setUsuario(e.target.value.toLowerCase().replace(/\s+/g, ''))}
+              onChange={(e) => {
+                const value = e.target.value.toLowerCase().replace(/\s+/g, '');
+                setUsuario(value);
+                if (value.trim()) setFormErrors(errors => ({ ...errors, usuario: undefined }));
+              }}
               placeholder="Ex: joao.silva"
-              helperText="Identificador único para login no sistema."
+              helperText={formErrors.usuario || 'Identificador único para login no sistema.'}
               id="user-form-login"
+              error={Boolean(formErrors.usuario)}
             />
 
             {/* Password */}
@@ -556,10 +593,20 @@ export default function Usuarios() {
               fullWidth
               size="small"
               value={senha}
-              onChange={(e) => setSenha(e.target.value)}
-              placeholder={editingItem ? "Deixe em branco para manter a atual" : "Mínimo 6 caracteres"}
-              helperText={editingItem ? "Preencha apenas se deseja alterar a senha atual do utilizador." : "Senha padrão para o primeiro acesso do utilizador."}
+              onChange={(e) => {
+                setSenha(e.target.value);
+                if (
+                  (!editingItem || e.target.value.trim())
+                  && e.target.value.trim().length >= 8
+                  && e.target.value.trim().length <= 20
+                ) {
+                  setFormErrors(errors => ({ ...errors, senha: undefined }));
+                }
+              }}
+              placeholder={editingItem ? "Deixe em branco para manter a atual" : "8 a 20 caracteres"}
+              helperText={formErrors.senha || (editingItem ? "Preencha apenas se deseja alterar a senha atual do utilizador." : "Use entre 8 e 20 caracteres; será a senha de primeiro acesso.")}
               id="user-form-password"
+              error={Boolean(formErrors.senha)}
             />
 
             {/* Profile Dropdown */}

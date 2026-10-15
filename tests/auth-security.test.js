@@ -6,6 +6,7 @@ import {
   createAuthSecurity,
   hashPassword,
   migratePlaintextPasswords,
+  normalizeAgentPermissions,
   verifyStoredPassword,
 } from '../src/auth/security.js';
 
@@ -98,6 +99,23 @@ test('new passwords use Argon2id and verify only the matching password', async (
   assert.notEqual(stored, password);
   assert.equal((await verifyStoredPassword(password, stored)).valid, true);
   assert.equal((await verifyStoredPassword('incorrect-password', stored)).valid, false);
+});
+
+test('new passwords must contain between 8 and 20 characters', async () => {
+  const minimumLengthPassword = '12345678';
+  const maximumLengthPassword = '12345678901234567890';
+
+  assert.match(await hashPassword(minimumLengthPassword), /^\$argon2id\$/);
+  assert.match(await hashPassword(maximumLengthPassword), /^\$argon2id\$/);
+  await assert.rejects(hashPassword('1234567'), /8 e 20 caracteres/);
+  await assert.rejects(hashPassword('123456789012345678901'), /8 e 20 caracteres/);
+});
+
+test('agent permissions are normalized and reject unknown or empty permissions', () => {
+  assert.deepEqual(normalizeAgentPermissions(['Cobrar', ' Offline ', 'Cobrar']), ['Cobrar', 'Offline']);
+  assert.deepEqual(normalizeAgentPermissions('Cobrar,Offline'), ['Cobrar', 'Offline']);
+  assert.equal(normalizeAgentPermissions([]), null);
+  assert.equal(normalizeAgentPermissions(['Cobrar', 'Admin']), null);
 });
 
 test('legacy SHA-256 passwords verify only for migration and request a rehash', async () => {
@@ -438,6 +456,48 @@ test('agents can change only contributor status within their municipality', asyn
     },
   }, deniedResponse, () => assert.fail('Agent must not edit contributor profile fields.'));
   assert.equal(deniedResponse.statusCode, 400);
+});
+
+test('agent payment and sync writes require their current database permissions', async () => {
+  process.env.JWT_ACCESS_SECRET = 'test-access-secret-that-is-at-least-32-bytes';
+  process.env.JWT_REFRESH_SECRET = 'test-refresh-secret-that-is-at-least-32-bytes';
+  let storedPermissions = 'Offline';
+  const security = createAuthSecurity({
+    query: async (sql, values) => {
+      assert.match(sql, /SELECT permissoes FROM agentes WHERE id = \$1/);
+      assert.deepEqual(values, ['agent-1']);
+      return { rows: [{ permissoes: storedPermissions }] };
+    },
+  });
+  const agentAuth = {
+    id: 'agent-1',
+    kind: 'agent',
+    role: 'AGENTE',
+    mustChangePassword: false,
+  };
+  const authorize = (path) => new Promise((resolve) => {
+    const response = {
+      statusCode: 200,
+      status(code) {
+        this.statusCode = code;
+        return this;
+      },
+      json(body) {
+        resolve({ status: this.statusCode, body });
+        return this;
+      },
+    };
+    security.authorizeApi({ path, method: 'POST', auth: agentAuth }, response, () => {
+      resolve({ status: 200 });
+    });
+  });
+
+  assert.equal((await authorize('/api/pagamentos')).status, 403);
+  assert.equal((await authorize('/api/sincronizacao')).status, 200);
+
+  storedPermissions = 'Cobrar';
+  assert.equal((await authorize('/api/pagamentos')).status, 200);
+  assert.equal((await authorize('/api/sincronizacao')).status, 403);
 });
 
 test('refresh rotation detects replay and logout revokes the refresh session', async () => {

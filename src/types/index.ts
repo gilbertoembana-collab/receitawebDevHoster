@@ -137,7 +137,7 @@ export interface AuditoriaLog {
   hora: string; // HH:mm:ss
   ip: string;
   dispositivo: string;
-  acao: 'login' | 'logout' | 'criacao' | 'alteracao' | 'exclusao' | 'cancelamento' | 'reimpressao' | 'sincronizacao' | 'backup';
+  acao: 'login' | 'logout' | 'criacao' | 'alteracao' | 'exclusao' | 'cancelamento' | 'reimpressao' | 'sincronizacao' | 'backup' | 'restore';
   descricao: string;
 }
 
