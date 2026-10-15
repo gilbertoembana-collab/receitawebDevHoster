@@ -1,5 +1,6 @@
-import { pgTable, text, integer, boolean, doublePrecision, real, index, timestamp, date, uniqueIndex } from 'drizzle-orm/pg-core';
+import { pgTable, text, integer, boolean, doublePrecision, real, index, timestamp, date, uniqueIndex, jsonb } from 'drizzle-orm/pg-core';
 import { relations } from 'drizzle-orm';
+import type { Dispositivo } from '../types';
 
 // ==========================================
 // TABELAS OFICIAIS DO SISTEMA RECEITA360
@@ -208,6 +209,13 @@ export const configuracoes = pgTable('configuracoes', {
   comissaoPaga: integer('comissao_paga').notNull().default(0),
   metaDiariaAgente: integer('meta_diaria_agente').notNull().default(100000),
   percentualIncentivo: integer('percentual_incentivo').notNull().default(5),
+  modoOfflineHoras: integer('modo_offline_horas').notNull().default(24),
+  geofencingAtivo: boolean('geofencing_ativo').notNull().default(true),
+  limiteDiarioColetaPorAgente: integer('limite_diario_coleta_por_agente').notNull().default(500000),
+  imprimirLogoRecibo: boolean('imprimir_logo_recibo').notNull().default(true),
+  textoRodapeRecibo: text('texto_rodape_recibo').notNull().default('Obrigado por contribuir com o desenvolvimento do Município.'),
+  versaoMinimaApp: text('versao_minima_app').notNull().default('2.4.0'),
+  dispositivos: jsonb('dispositivos').$type<Dispositivo[]>().notNull().default([]),
 });
 
 // ==========================================

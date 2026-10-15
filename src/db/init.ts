@@ -365,6 +365,13 @@ export async function initializeDatabase() {
     await client.query(`
       ALTER TABLE configuracoes ADD COLUMN IF NOT EXISTS meta_diaria_agente INTEGER NOT NULL DEFAULT 100000;
       ALTER TABLE configuracoes ADD COLUMN IF NOT EXISTS percentual_incentivo INTEGER NOT NULL DEFAULT 5;
+      ALTER TABLE configuracoes ADD COLUMN IF NOT EXISTS modo_offline_horas INTEGER NOT NULL DEFAULT 24;
+      ALTER TABLE configuracoes ADD COLUMN IF NOT EXISTS geofencing_ativo BOOLEAN NOT NULL DEFAULT true;
+      ALTER TABLE configuracoes ADD COLUMN IF NOT EXISTS limite_diario_coleta_por_agente INTEGER NOT NULL DEFAULT 500000;
+      ALTER TABLE configuracoes ADD COLUMN IF NOT EXISTS imprimir_logo_recibo BOOLEAN NOT NULL DEFAULT true;
+      ALTER TABLE configuracoes ADD COLUMN IF NOT EXISTS texto_rodape_recibo TEXT NOT NULL DEFAULT 'Obrigado por contribuir com o desenvolvimento do Município.';
+      ALTER TABLE configuracoes ADD COLUMN IF NOT EXISTS versao_minima_app TEXT NOT NULL DEFAULT '2.4.0';
+      ALTER TABLE configuracoes ADD COLUMN IF NOT EXISTS dispositivos JSONB NOT NULL DEFAULT '[]'::jsonb;
     `);
 
     // ==========================================

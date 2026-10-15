@@ -3,29 +3,30 @@ import { useAppStore } from '../../store';
 import { dbService } from '../../services/db';
 import { Dispositivo } from '../../types';
 import FormattedCurrencyInput from '../../components/FormattedCurrencyInput';
+import { apiFetch } from '../../services/api';
 import { 
   Settings, Image, Database, Radio, Trash2, ShieldAlert, 
   Users, ShoppingBag, Landmark, Coins, Receipt, AlertTriangle, 
   RefreshCw, Layers, FileSpreadsheet, Smartphone, Key, Wifi, 
   QrCode, Lock, Unlock, PlusCircle, RotateCw, Printer, BatteryCharging, 
-  CheckCircle2, ShieldCheck, Copy, Target
+  CheckCircle2, ShieldCheck, Target
 } from 'lucide-react';
 import { 
-  Box, Typography, Card, CardContent, TextField, Button, Switch, 
+  Box, Typography, Card, CardContent, TextField, Button, Switch, Alert,
   FormControl, Select, MenuItem, InputLabel, FormControlLabel, Divider, Chip,
   Dialog, DialogTitle, DialogContent, DialogActions, Paper,
   Table, TableBody, TableCell, TableContainer, TableHead, TableRow,
-  InputAdornment, Tooltip, IconButton, LinearProgress
+  Tooltip, IconButton, LinearProgress
 } from '@mui/material';
 
 export default function Configuracoes() {
   const { 
-    configuracoes, updateConfiguracoes, addNotification, currentUser, activeProfile,
+    configuracoes, saveConfiguracoes, addNotification, currentUser, activeProfile,
     pagamentos, agentes, mercados, contribuintes, municipios, tiposReceita, auditoriaLogs
   } = useAppStore();
 
   // Check if user has Owner / Super Admin privilege
-  const isOwner = ['Platform Owner', 'Super Administrador', 'Super Admin', 'Administrador Nacional'].includes(activeProfile);
+  const isOwner = ['Platform Owner', 'Super Administrador', 'Super Admin', 'Administrator'].includes(activeProfile);
 
   const isInitializedRef = React.useRef(false);
 
@@ -33,7 +34,6 @@ export default function Configuracoes() {
   const [nomeMunicipio, setNomeMunicipio] = useState(configuracoes.nomeMunicipio);
   const [moeda, setMoeda] = useState(configuracoes.moeda);
   const [fusoHorario, setFusoHorario] = useState(configuracoes.fusoHorario);
-  const [backupHabilitado, setBackupHabilitado] = useState(configuracoes.backupHabilitado);
   const [notificacoesHabilitadas, setNotificacoesHabilitadas] = useState(configuracoes.notificacoesHabilitadas);
   const [taxaComissao, setTaxaComissao] = useState(configuracoes.taxaComissao ?? 10);
   const [logoCamara, setLogoCamara] = useState(configuracoes.logoCamara || '');
@@ -48,8 +48,10 @@ export default function Configuracoes() {
   const [imprimirLogoRecibo, setImprimirLogoRecibo] = useState(configuracoes.imprimirLogoRecibo ?? true);
   const [textoRodapeRecibo, setTextoRodapeRecibo] = useState(configuracoes.textoRodapeRecibo || 'Obrigado por contribuir com o desenvolvimento do Município.');
   const [versaoMinimaApp, setVersaoMinimaApp] = useState(configuracoes.versaoMinimaApp || '2.4.0');
-  const [chaveApiGlobalDispositivos, setChaveApiGlobalDispositivos] = useState(configuracoes.chaveApiGlobalDispositivos || 'R360-DEV-KEY-9842-GS-TIC');
   const [dispositivos, setDispositivos] = useState<Dispositivo[]>(configuracoes.dispositivos || []);
+  const [isBackingUp, setIsBackingUp] = useState(false);
+  const [backupMessage, setBackupMessage] = useState('');
+  const [securityMessage, setSecurityMessage] = useState('');
 
   // Modal State for New Device Registration
   const [openDeviceModal, setOpenDeviceModal] = useState(false);
@@ -107,8 +109,8 @@ export default function Configuracoes() {
   };
 
   useEffect(() => {
-    runConnectionCheck();
-  }, []);
+    if (isOwner) void runConnectionCheck();
+  }, [isOwner]);
 
   useEffect(() => {
     try {
@@ -133,63 +135,69 @@ export default function Configuracoes() {
 
       if (!isInitializedRef.current) {
         setNomeMunicipio(configuracoes.nomeMunicipio || '');
-      setMoeda(configuracoes.moeda || 'FCFA');
-      setFusoHorario(configuracoes.fusoHorario || 'GMT-0');
-      setBackupHabilitado(!!configuracoes.backupHabilitado);
-      setNotificacoesHabilitadas(!!configuracoes.notificacoesHabilitadas);
-      setTaxaComissao(configuracoes.taxaComissao ?? 10);
-      setLogoCamara(configuracoes.logoCamara || '');
+        setMoeda(configuracoes.moeda || 'FCFA');
+        setFusoHorario(configuracoes.fusoHorario || 'GMT-0');
+        setNotificacoesHabilitadas(!!configuracoes.notificacoesHabilitadas);
+        setTaxaComissao(configuracoes.taxaComissao ?? 10);
+        setLogoCamara(configuracoes.logoCamara || '');
         setMetaDiariaAgente(savedMeta);
-      setPercentualIncentivo(configuracoes.percentualIncentivo ?? 5);
+        setPercentualIncentivo(configuracoes.percentualIncentivo ?? 5);
 
-      setModoOfflineHoras(configuracoes.modoOfflineHoras ?? 24);
-      setGeofencingAtivo(configuracoes.geofencingAtivo ?? true);
-      setLimiteDiarioColetaPorAgente(configuracoes.limiteDiarioColetaPorAgente ?? 500000);
-      setImprimirLogoRecibo(configuracoes.imprimirLogoRecibo ?? true);
-      setTextoRodapeRecibo(configuracoes.textoRodapeRecibo || 'Obrigado por contribuir com o desenvolvimento do Município.');
-      setVersaoMinimaApp(configuracoes.versaoMinimaApp || '2.4.0');
-      setChaveApiGlobalDispositivos(configuracoes.chaveApiGlobalDispositivos || 'R360-DEV-KEY-9842-GS-TIC');
+        setModoOfflineHoras(configuracoes.modoOfflineHoras ?? 24);
+        setGeofencingAtivo(configuracoes.geofencingAtivo ?? true);
+        setLimiteDiarioColetaPorAgente(configuracoes.limiteDiarioColetaPorAgente ?? 500000);
+        setImprimirLogoRecibo(configuracoes.imprimirLogoRecibo ?? true);
+        setTextoRodapeRecibo(configuracoes.textoRodapeRecibo || 'Obrigado por contribuir com o desenvolvimento do Município.');
+        setVersaoMinimaApp(configuracoes.versaoMinimaApp || '2.4.0');
         setDispositivos(configuracoes.dispositivos || []);
         isInitializedRef.current = true;
       }
     }
   }, [configuracoes]);
 
-  const handleSaveDeviceConfig = () => {
-    updateConfiguracoes({
-      modoOfflineHoras: Number(modoOfflineHoras),
-      geofencingAtivo,
-      limiteDiarioColetaPorAgente: Number(limiteDiarioColetaPorAgente),
-      imprimirLogoRecibo,
-      textoRodapeRecibo,
-      versaoMinimaApp,
-      chaveApiGlobalDispositivos,
-      dispositivos
-    });
+  const handleSaveDeviceConfig = async () => {
+    try {
+      await saveConfiguracoes({
+        modoOfflineHoras: Number(modoOfflineHoras),
+        geofencingAtivo,
+        limiteDiarioColetaPorAgente: Number(limiteDiarioColetaPorAgente),
+        imprimirLogoRecibo,
+        textoRodapeRecibo,
+        versaoMinimaApp,
+        dispositivos
+      });
 
-    addNotification({
-      title: 'Configurações de Dispositivos Salvas',
-      message: 'As regras globais de operação do aplicativo móvel de arrecadação foram salvas com sucesso.',
-      type: 'success'
-    });
-
-    alert('Configurações do aplicativo móvel de cobrança salvas com sucesso!');
+      addNotification({
+        title: 'Configurações de Dispositivos Salvas',
+        message: 'As configurações dos dispositivos foram guardadas no PostgreSQL.',
+        type: 'success'
+      });
+    } catch (error) {
+      addNotification({
+        title: 'Erro ao Guardar',
+        message: error instanceof Error ? error.message : 'Não foi possível guardar as configurações dos dispositivos.',
+        type: 'warning'
+      });
+    }
   };
 
-  const handleGenerateNewApiKey = () => {
-    const randomHex = Array.from({ length: 4 }, () => Math.floor(Math.random() * 65536).toString(16).toUpperCase()).join('-');
-    const newKey = `R360-SEC-${randomHex}-GS-TIC`;
-    setChaveApiGlobalDispositivos(newKey);
-    updateConfiguracoes({ chaveApiGlobalDispositivos: newKey });
-
-    addNotification({
-      title: 'Chave Global Rotacionada',
-      message: 'Nova chave de API de comunicação gerada para todos os terminais móveis.',
-      type: 'warning'
-    });
+  const persistDevices = async (updated: Dispositivo[], successTitle: string, successMessage: string) => {
+    try {
+      await saveConfiguracoes({ dispositivos: updated });
+      setDispositivos(updated);
+      addNotification({ title: successTitle, message: successMessage, type: 'success' });
+      return true;
+    } catch (error) {
+      addNotification({
+        title: 'Erro ao Guardar Dispositivos',
+        message: error instanceof Error ? error.message : 'Não foi possível guardar os dispositivos.',
+        type: 'warning'
+      });
+      return false;
+    }
   };
 
-  const handleToggleDeviceStatus = (devId: string) => {
+  const handleToggleDeviceStatus = async (devId: string) => {
     const updated = dispositivos.map(d => {
       if (d.id === devId) {
         const newStatus = d.status === 'ativo' ? 'bloqueado' : 'ativo';
@@ -197,18 +205,16 @@ export default function Configuracoes() {
       }
       return d;
     });
-    setDispositivos(updated);
-    updateConfiguracoes({ dispositivos: updated });
 
     const target = dispositivos.find(d => d.id === devId);
-    addNotification({
-      title: 'Status de Dispositivo Alterado',
-      message: `O dispositivo ${target?.codigo} foi ${target?.status === 'ativo' ? 'bloqueado' : 'desbloqueado'}.`,
-      type: 'info'
-    });
+    await persistDevices(
+      updated,
+      'Status de Dispositivo Alterado',
+      `O dispositivo ${target?.codigo} foi ${target?.status === 'ativo' ? 'bloqueado' : 'desbloqueado'}.`,
+    );
   };
 
-  const handleForceSyncDevice = (devId: string) => {
+  const handleForceSyncDevice = async (devId: string) => {
     const nowIso = new Date().toISOString();
     const updated = dispositivos.map(d => {
       if (d.id === devId) {
@@ -216,31 +222,22 @@ export default function Configuracoes() {
       }
       return d;
     });
-    setDispositivos(updated);
-    updateConfiguracoes({ dispositivos: updated });
 
     const target = dispositivos.find(d => d.id === devId);
-    addNotification({
-      title: 'Sincronização Forçada Enviada',
-      message: `Sinal de atualização enviado com sucesso para o terminal ${target?.codigo}.`,
-      type: 'success'
-    });
+    await persistDevices(
+      updated,
+      'Registo Atualizado',
+      `A data de sincronização do terminal ${target?.codigo} foi atualizada. Não foi enviado um sinal ao dispositivo.`,
+    );
   };
 
-  const handleDeleteDevice = (devId: string) => {
+  const handleDeleteDevice = async (devId: string) => {
     if (!confirm('Deseja realmente remover este dispositivo autorizador do sistema?')) return;
     const updated = dispositivos.filter(d => d.id !== devId);
-    setDispositivos(updated);
-    updateConfiguracoes({ dispositivos: updated });
-
-    addNotification({
-      title: 'Dispositivo Desvinculado',
-      message: 'O terminal móvel foi removido com sucesso.',
-      type: 'warning'
-    });
+    await persistDevices(updated, 'Dispositivo Desvinculado', 'O terminal móvel foi removido.');
   };
 
-  const handleAddDeviceSubmit = () => {
+  const handleAddDeviceSubmit = async () => {
     if (!devCodigo || !devNome || !devImeiUuid) {
       alert('Por favor preencha os campos obrigatórios (Código, Nome do Aparelho e IMEI/UUID).');
       return;
@@ -268,14 +265,12 @@ export default function Configuracoes() {
     };
 
     const updated = [...dispositivos, newDev];
-    setDispositivos(updated);
-    updateConfiguracoes({ dispositivos: updated });
-
-    addNotification({
-      title: 'Novo Dispositivo Autorizado',
-      message: `O terminal ${devCodigo} foi cadastrado e autorizado para operação em campo.`,
-      type: 'success'
-    });
+    const saved = await persistDevices(
+      updated,
+      'Dispositivo Registado',
+      `O terminal ${devCodigo} foi registado.`,
+    );
+    if (!saved) return;
 
     setOpenDeviceModal(false);
     setDevCodigo('');
@@ -339,7 +334,7 @@ export default function Configuracoes() {
     }
   };
 
-  const handleValidarMeta = () => {
+  const handleValidarMeta = async () => {
     const novoValor = Number(metaDiariaAgente);
     if (isNaN(novoValor) || novoValor <= 0) {
       addNotification({
@@ -352,65 +347,122 @@ export default function Configuracoes() {
 
     const antigoValor = metaDiariaSalva;
     
-    updateConfiguracoes({
-      metaDiariaAgente: novoValor
-    });
-
-    setMetaDiariaSalva(novoValor);
-
-    addNotification({
-      title: 'Meta Diária Validada e Atualizada',
-      message: `Meta de arrecadação atualizada de ${antigoValor.toLocaleString('pt-PT')} ${moeda} para ${novoValor.toLocaleString('pt-PT')} ${moeda}.`,
-      type: 'success'
-    });
+    try {
+      await saveConfiguracoes({ metaDiariaAgente: novoValor });
+      setMetaDiariaSalva(novoValor);
+      addNotification({
+        title: 'Meta Diária Atualizada',
+        message: `Meta alterada de ${antigoValor.toLocaleString('pt-PT')} ${moeda} para ${novoValor.toLocaleString('pt-PT')} ${moeda}.`,
+        type: 'success'
+      });
+    } catch (error) {
+      addNotification({
+        title: 'Erro ao Guardar Meta',
+        message: error instanceof Error ? error.message : 'Não foi possível guardar a meta diária.',
+        type: 'warning'
+      });
+    }
   };
 
-  const handleSaveMunicipais = () => {
+  const handleSaveMunicipais = async () => {
     const novoValorMeta = Number(metaDiariaAgente);
-    updateConfiguracoes({
-      nomeMunicipio,
-      moeda,
-      fusoHorario,
-      taxaComissao: Number(taxaComissao),
-      logoCamara,
-      metaDiariaAgente: novoValorMeta,
-      percentualIncentivo: Number(percentualIncentivo)
-    });
+    try {
+      await saveConfiguracoes({
+        nomeMunicipio,
+        moeda,
+        fusoHorario,
+        taxaComissao: Number(taxaComissao),
+        logoCamara,
+        metaDiariaAgente: novoValorMeta,
+        percentualIncentivo: Number(percentualIncentivo)
+      });
 
-    setMetaDiariaSalva(novoValorMeta);
-
-    addNotification({
-      title: 'Parâmetros Municipais Salvos',
-      message: `Os parâmetros municipais para ${nomeMunicipio || 'o município'}, metas diárias e incentivos foram atualizados com sucesso.`,
-      type: 'success'
-    });
-
-    alert('Parâmetros municipais e de metas de incentivo salvos com sucesso!');
+      setMetaDiariaSalva(novoValorMeta);
+      addNotification({
+        title: 'Parâmetros Municipais Salvos',
+        message: `Os parâmetros municipais para ${nomeMunicipio || 'o município'} foram guardados no PostgreSQL.`,
+        type: 'success'
+      });
+    } catch (error) {
+      addNotification({
+        title: 'Erro ao Guardar',
+        message: error instanceof Error ? error.message : 'Não foi possível guardar os parâmetros municipais.',
+        type: 'warning'
+      });
+    }
   };
 
-  const handleSaveSeguranca = () => {
-    updateConfiguracoes({
-      backupHabilitado,
-      notificacoesHabilitadas
-    });
-
-    addNotification({
-      title: 'Configurações de Segurança Salvas',
-      message: 'As preferências de backup diário e notificações do sistema foram atualizadas com sucesso.',
-      type: 'success'
-    });
-
-    alert('Configurações de segurança e backup salvas com sucesso!');
+  const handleSaveSeguranca = async () => {
+    setSecurityMessage('');
+    try {
+      await saveConfiguracoes({ notificacoesHabilitadas });
+      setSecurityMessage('Preferência de notificações guardada.');
+      addNotification({
+        title: 'Preferência Guardada',
+        message: 'A preferência de notificações dentro do sistema foi guardada.',
+        type: 'success'
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Não foi possível guardar a preferência de notificações.';
+      setSecurityMessage(errorMessage);
+      addNotification({
+        title: 'Erro ao Guardar',
+        message: errorMessage,
+        type: 'warning'
+      });
+    }
   };
 
-  const handleBackupNow = () => {
-    addNotification({
-      title: 'Backup Concluído',
-      message: 'Cópia de segurança da base de dados PostgreSQL e logs gerada com sucesso e arquivada.',
-      type: 'success'
-    });
-    alert('Cópia de segurança criada com sucesso no servidor de banco de dados!');
+  const handleBackupNow = async () => {
+    setIsBackingUp(true);
+    setBackupMessage('A gerar a cópia de segurança do PostgreSQL...');
+    try {
+      const response = await apiFetch('/api/admin/backup');
+      if (!response.ok) {
+        const result = await response.json().catch(() => null);
+        throw new Error(typeof result?.error === 'string' ? result.error : 'Não foi possível gerar a cópia de segurança.');
+      }
+
+      const backup = await response.blob();
+      if (!backup.size) throw new Error('O servidor devolveu um ficheiro de backup vazio.');
+
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const objectUrl = URL.createObjectURL(backup);
+      const downloadLink = document.createElement('a');
+      downloadLink.href = objectUrl;
+      downloadLink.download = `receita360-postgresql-${timestamp}.dump`;
+      document.body.appendChild(downloadLink);
+      downloadLink.click();
+      downloadLink.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+
+      const successMessage = 'Backup PostgreSQL descarregado. Guarde o ficheiro num local seguro.';
+      setBackupMessage(successMessage);
+      addNotification({
+        title: 'Backup Descarregado',
+        message: successMessage,
+        type: 'success'
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Não foi possível gerar a cópia de segurança.';
+      setBackupMessage(`Falha no backup: ${errorMessage}`);
+      addNotification({
+        title: 'Falha no Backup',
+        message: errorMessage,
+        type: 'warning'
+      });
+    } finally {
+      setIsBackingUp(false);
+    }
   };
+
+  if (!isOwner) {
+    return (
+      <Box sx={{ py: 2 }}>
+        <Alert severity="error">Não tem permissões para aceder às configurações globais do sistema.</Alert>
+      </Box>
+    );
+  }
 
   return (
     <Box sx={{ py: 1 }} className="animate-fade-in">
@@ -636,21 +688,9 @@ export default function Configuracoes() {
               </Box>
 
               <div className="space-y-4">
-                <FormControlLabel
-                  control={
-                    <Switch 
-                      checked={backupHabilitado} 
-                      onChange={(e) => setBackupHabilitado(e.target.checked)} 
-                    />
-                  }
-                  label={
-                    <div>
-                      <span className="text-xs font-semibold block">Backup Diário Automático</span>
-                      <span className="text-[10px] text-slate-400 block">Sincronizar cópias no Supabase Storage à meia-noite</span>
-                    </div>
-                  }
-                  id="config-field-backup"
-                />
+                <Alert severity="info">
+                  O sistema usa PostgreSQL. O backup manual descarrega um ficheiro completo da base de dados. O backup automático ainda não está agendado no servidor; configure uma tarefa agendada no alojamento.
+                </Alert>
 
                 <Divider />
 
@@ -663,8 +703,8 @@ export default function Configuracoes() {
                   }
                   label={
                     <div>
-                      <span className="text-xs font-semibold block">Notificações por Push / E-mail</span>
-                      <span className="text-[10px] text-slate-400 block">Enviar alertas em tempo real de novos cancelamentos</span>
+                      <span className="text-xs font-semibold block">Notificações dentro do sistema</span>
+                      <span className="text-[10px] text-slate-400 block">Ativar ou silenciar os alertas apresentados na plataforma. Push e e-mail não estão configurados.</span>
                     </div>
                   }
                   id="config-field-notif"
@@ -672,13 +712,42 @@ export default function Configuracoes() {
 
                 <Divider sx={{ my: 1 }} />
 
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <Button variant="outlined" color="secondary" startIcon={<Database size={15} />} onClick={handleBackupNow} id="btn-run-backup">
-                    Realizar Backup Agora
-                  </Button>
-                  <Button variant="contained" onClick={handleSaveSeguranca} id="btn-save-settings">
-                    Salvar Alterações
-                  </Button>
+                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2, justifyContent: 'space-between', alignItems: 'center' }}>
+                  <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                    <Button
+                      variant="outlined"
+                      color="secondary"
+                      startIcon={<Database size={15} />}
+                      onClick={handleBackupNow}
+                      disabled={isBackingUp}
+                      id="btn-run-backup"
+                    >
+                      {isBackingUp ? 'A gerar backup...' : 'Descarregar Backup PostgreSQL'}
+                    </Button>
+                    {backupMessage && (
+                      <Typography
+                        variant="caption"
+                        role="status"
+                        color={backupMessage.startsWith('Falha') ? 'error' : 'text.secondary'}
+                      >
+                        {backupMessage}
+                      </Typography>
+                    )}
+                  </Box>
+                  <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 1 }}>
+                    {securityMessage && (
+                      <Typography
+                        variant="caption"
+                        role="status"
+                        color={securityMessage.startsWith('Preferência') ? 'success.main' : 'error'}
+                      >
+                        {securityMessage}
+                      </Typography>
+                    )}
+                    <Button variant="contained" onClick={handleSaveSeguranca} id="btn-save-settings">
+                      Guardar Preferência
+                    </Button>
+                  </Box>
                 </Box>
               </div>
             </CardContent>
@@ -971,45 +1040,6 @@ export default function Configuracoes() {
                 />
               </Paper>
 
-              {/* 6. Chave Global API Dispositivos */}
-              <Paper variant="outlined" sx={{ p: 2, borderRadius: 2 }}>
-                <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>
-                  Chave Secreta de API (Dispositivos)
-                </Typography>
-                <TextField
-                  size="small"
-                  fullWidth
-                  value={chaveApiGlobalDispositivos}
-                  slotProps={{
-                    input: {
-                      readOnly: true,
-                      endAdornment: (
-                        <InputAdornment position="end">
-                          <Tooltip title="Copiar Chave">
-                            <IconButton size="small" onClick={() => {
-                              navigator.clipboard.writeText(chaveApiGlobalDispositivos);
-                              addNotification({ title: 'Chave Copiada', message: 'Chave de API copiada para a área de transferência.', type: 'info' });
-                            }}>
-                              <Copy size={14} />
-                            </IconButton>
-                          </Tooltip>
-                        </InputAdornment>
-                      )
-                    }
-                  }}
-                  id="field-chave-api"
-                />
-                <Button 
-                  size="small" 
-                  color="warning" 
-                  variant="text" 
-                  startIcon={<RotateCw size={12} />}
-                  onClick={handleGenerateNewApiKey}
-                  sx={{ textTransform: 'none', mt: 1, p: 0, fontSize: '11px' }}
-                >
-                  Rotacionar Secret Token
-                </Button>
-              </Paper>
             </div>
 
             <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 4 }}>

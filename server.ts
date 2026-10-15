@@ -1,6 +1,8 @@
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
+import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import * as dotenv from 'dotenv';
 dotenv.config();
 
@@ -58,6 +60,63 @@ function classifyImportedContributor(activityValue: unknown, categoryValue: unkn
 }
 
 const LEGACY_REGISTRATION_AGENT_ID = 'agen-f7rm38ilf';
+const CONFIGURATION_FIELDS = new Set([
+  'logoCamara', 'nomeMunicipio', 'moeda', 'fusoHorario', 'backupHabilitado',
+  'temaEscuro', 'notificacoesHabilitadas', 'taxaComissao', 'comissaoPaga',
+  'metaDiariaAgente', 'percentualIncentivo', 'modoOfflineHoras', 'geofencingAtivo',
+  'limiteDiarioColetaPorAgente', 'imprimirLogoRecibo', 'textoRodapeRecibo',
+  'versaoMinimaApp', 'dispositivos',
+]);
+const CONFIGURATION_BOOLEAN_FIELDS = new Set([
+  'backupHabilitado', 'temaEscuro', 'notificacoesHabilitadas', 'geofencingAtivo', 'imprimirLogoRecibo',
+]);
+const CONFIGURATION_INTEGER_RANGES: Record<string, [number, number]> = {
+  taxaComissao: [0, 100],
+  comissaoPaga: [0, 2_000_000_000],
+  metaDiariaAgente: [1, 2_000_000_000],
+  percentualIncentivo: [0, 100],
+  modoOfflineHoras: [1, 168],
+  limiteDiarioColetaPorAgente: [1, 2_000_000_000],
+};
+const CONFIGURATION_STRING_LIMITS: Record<string, number> = {
+  logoCamara: 1_500_000,
+  nomeMunicipio: 200,
+  moeda: 8,
+  fusoHorario: 50,
+  textoRodapeRecibo: 500,
+  versaoMinimaApp: 30,
+};
+
+function validateConfigurationUpdates(body: unknown): Record<string, unknown> | null {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+  const updates = body as Record<string, unknown>;
+  const keys = Object.keys(updates);
+  if (!keys.length || keys.some((key) => !CONFIGURATION_FIELDS.has(key))) return null;
+
+  for (const [key, value] of Object.entries(updates)) {
+    if (CONFIGURATION_BOOLEAN_FIELDS.has(key) && typeof value !== 'boolean') return null;
+    const integerRange = CONFIGURATION_INTEGER_RANGES[key];
+    if (integerRange && (
+      typeof value !== 'number'
+      || !Number.isSafeInteger(value)
+      || value < integerRange[0]
+      || value > integerRange[1]
+    )) return null;
+    const stringLimit = CONFIGURATION_STRING_LIMITS[key];
+    if (stringLimit && (
+      typeof value !== 'string'
+      || value.length > stringLimit
+      || (key === 'nomeMunicipio' && !value.trim())
+    )) return null;
+    if (key === 'dispositivos' && (
+      !Array.isArray(value)
+      || value.length > 1000
+      || value.some((device) => !device || typeof device !== 'object' || Array.isArray(device))
+    )) return null;
+  }
+
+  return updates;
+}
 
 async function resolveContributorRegistrationAgent(req: express.Request): Promise<string> {
   if (req.auth?.kind === 'agent') {
@@ -161,6 +220,7 @@ async function startServer() {
   const { createPool } = await import('./src/db/index.ts');
   const pool = createPool();
   const auth = createAuthSecurity(pool);
+  let backupInProgress = false;
   const reactivateExpiredContributors = async () => {
     await pool.query(
       `UPDATE contribuintes
@@ -190,6 +250,7 @@ async function startServer() {
 
   // Express middleware to parse json bodies
   app.use(express.json({ limit: '15mb' }));
+  app.use(auth.normalizeApiVersion);
   app.use(auth.cors);
   app.use(auth.authenticateApi);
   app.use(auth.authorizeApi);
@@ -255,6 +316,157 @@ async function startServer() {
         checkedAt: new Date().toISOString()
       });
     }
+  });
+
+  app.get('/api/admin/backup', async (req, res) => {
+    if (!['Platform Owner', 'Super Admin', 'Super Administrador', 'Administrator'].includes(req.auth?.role || '')) {
+      return res.status(403).json({ error: 'Ação não autorizada.' });
+    }
+    if (backupInProgress) {
+      return res.status(409).json({ error: 'Já existe um backup em execução.' });
+    }
+
+    let databaseUrl: URL;
+    let databaseName: string;
+    let host: string;
+    let username: string;
+    let password: string;
+    try {
+      if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL não configurado.');
+      databaseUrl = new URL(process.env.DATABASE_URL);
+      if (!['postgres:', 'postgresql:'].includes(databaseUrl.protocol)) {
+        throw new Error('DATABASE_URL não é uma ligação PostgreSQL válida.');
+      }
+      databaseName = decodeURIComponent(databaseUrl.pathname.replace(/^\/+/, ''));
+      host = databaseUrl.hostname.replace(/^\[|\]$/g, '');
+      username = decodeURIComponent(databaseUrl.username);
+      password = decodeURIComponent(databaseUrl.password);
+    } catch (error) {
+      console.error('PostgreSQL backup configuration is invalid:', error);
+      return res.status(500).json({ error: 'A configuração do banco de dados não permite gerar o backup.' });
+    }
+
+    if (!databaseName || !host) {
+      return res.status(500).json({ error: 'A configuração do banco de dados não permite gerar o backup.' });
+    }
+
+    const isLocalDatabase = ['localhost', '127.0.0.1', '::1'].includes(host);
+    const configuredSslMode = databaseUrl.searchParams.get('sslmode');
+    const sslRequired = configuredSslMode === 'require'
+      || host.includes('supabase')
+      || (process.env.NODE_ENV === 'production' && !isLocalDatabase);
+    const sslModes = new Set(['disable', 'allow', 'prefer', 'require', 'verify-ca', 'verify-full']);
+    const sslMode = configuredSslMode && sslModes.has(configuredSslMode)
+      ? configuredSslMode
+      : sslRequired ? 'require' : 'disable';
+    const childEnvironment: NodeJS.ProcessEnv = {
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      LANG: process.env.LANG || 'C',
+      PGHOST: host,
+      PGPORT: databaseUrl.port || '5432',
+      PGUSER: username,
+      PGPASSWORD: password,
+      PGDATABASE: databaseName,
+      PGSSLMODE: sslRequired && sslMode === 'disable' ? 'require' : sslMode,
+      PGAPPNAME: 'receita360-backup',
+    };
+    const rootCertificate = databaseUrl.searchParams.get('sslrootcert');
+    if (rootCertificate) childEnvironment.PGSSLROOTCERT = rootCertificate;
+
+    const backupStartedAt = new Date();
+    const recordBackupAudit = async (outcome: string) => {
+      try {
+        await db.insert(auditoriaLog).values({
+          id: `audit-${randomUUID()}`,
+          usuario: req.auth?.email || req.auth?.id || 'unknown',
+          perfil: req.auth?.role || 'unknown',
+          data: backupStartedAt.toISOString().slice(0, 10),
+          hora: new Date().toISOString().slice(11, 19),
+          ip: req.ip || 'unknown',
+          dispositivo: req.get('x-client-type') || 'web',
+          acao: 'backup',
+          descricao: `Exportação PostgreSQL ${outcome}.`,
+        });
+      } catch (error) {
+        console.error('Could not record PostgreSQL backup audit event:', error);
+      }
+    };
+
+    backupInProgress = true;
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(
+        process.env.PG_DUMP_PATH || 'pg_dump',
+        ['--format=custom', '--no-owner', '--no-privileges', '--no-password', '--dbname', databaseName],
+        { env: childEnvironment, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true },
+      );
+    } catch (error) {
+      backupInProgress = false;
+      console.error('Could not start PostgreSQL backup process:', error);
+      return res.status(503).json({ error: 'Não foi possível iniciar o pg_dump no servidor.' });
+    }
+
+    const filename = `receita360-postgres-${backupStartedAt.toISOString().replace(/[:.]/g, '-')}.dump`;
+    let stderr = '';
+    let finished = false;
+    const finishOnce = () => {
+      if (finished) return false;
+      finished = true;
+      backupInProgress = false;
+      return true;
+    };
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      if (!res.headersSent) {
+        res.setHeader('Content-Type', 'application/vnd.postgresql.custom');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.setHeader('Cache-Control', 'no-store');
+        res.setHeader('X-Content-Type-Options', 'nosniff');
+      }
+      if (!res.write(chunk)) child.stdout.pause();
+    });
+    res.on('drain', () => child.stdout.resume());
+    res.on('close', () => {
+      if (!res.writableEnded && child.exitCode === null) child.kill('SIGTERM');
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr = `${stderr}${chunk.toString()}`.slice(-4000);
+    });
+    child.on('error', async (error) => {
+      if (!finishOnce()) return;
+      console.error('PostgreSQL backup process could not run:', error.message);
+      await recordBackupAudit('falhou ao iniciar');
+      if (!res.headersSent && !res.destroyed) {
+        res.status(503).json({ error: 'O pg_dump não está instalado ou não pode ser executado neste servidor.' });
+      } else if (!res.destroyed) {
+        res.destroy(error);
+      }
+    });
+    child.on('close', async (code) => {
+      if (!finishOnce()) return;
+      if (code === 0) {
+        await recordBackupAudit('concluída');
+        if (!res.destroyed) {
+          if (!res.headersSent) {
+            res.setHeader('Content-Type', 'application/vnd.postgresql.custom');
+            res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+            res.setHeader('Cache-Control', 'no-store');
+            res.setHeader('X-Content-Type-Options', 'nosniff');
+          }
+          res.end();
+        }
+        return;
+      }
+
+      console.error('PostgreSQL backup process failed:', { code, stderr });
+      await recordBackupAudit('falhou');
+      if (!res.headersSent && !res.destroyed) {
+        res.status(500).json({ error: 'O PostgreSQL não conseguiu gerar o backup. Verifique o pg_dump e as permissões do servidor.' });
+      } else if (!res.destroyed) {
+        res.destroy(new Error('PostgreSQL backup failed.'));
+      }
+    });
   });
 
   // --- API ROUTES ---
@@ -1823,11 +2035,18 @@ async function startServer() {
 
   app.put('/api/configuracoes', async (req, res) => {
     try {
+      const updates = validateConfigurationUpdates(req.body);
+      if (!updates) {
+        return res.status(400).json({ error: 'Os dados de configuração são inválidos ou contêm campos não suportados.' });
+      }
       const result = await db.update(configuracoes)
-        .set(req.body)
+        .set(updates)
         .where(eq(configuracoes.id, 1))
         .returning();
-      res.json(result[0] || { success: true });
+      if (!result[0]) {
+        return res.status(404).json({ error: 'A configuração do sistema ainda não foi inicializada.' });
+      }
+      res.json(result[0]);
     } catch (error: any) {
       console.error('Error updating configuracoes:', error);
       res.status(500).json({ error: 'Erro ao atualizar configurações.' });

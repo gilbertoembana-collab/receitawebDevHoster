@@ -32,6 +32,11 @@ export const createPool = () => {
     }
 
     const parsedUrl = new URL(dbUrl);
+    const configuredPoolMax = process.env.DB_POOL_MAX;
+    const poolMax = configuredPoolMax === undefined ? 5 : Number(configuredPoolMax);
+    if (!Number.isInteger(poolMax) || poolMax < 1 || poolMax > 20) {
+      throw new Error('DB_POOL_MAX must be an integer between 1 and 20.');
+    }
     const isLocalDatabase = ['localhost', '127.0.0.1', '::1'].includes(parsedUrl.hostname);
     if (isLocalDatabase && process.env.NODE_ENV !== 'production') {
       parsedUrl.searchParams.set('sslmode', 'disable');
@@ -41,9 +46,9 @@ export const createPool = () => {
       || (process.env.NODE_ENV === 'production' && !isLocalDatabase);
     global._postgresPool = new Pool({
       connectionString: parsedUrl.toString(),
-      max: 15,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 10000,
+      max: poolMax,
+      idleTimeoutMillis: 10000,
+      connectionTimeoutMillis: 5000,
       ssl: isSslRequired ? { rejectUnauthorized: true } : undefined,
     });
 

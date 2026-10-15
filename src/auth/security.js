@@ -218,17 +218,7 @@ export function createAuthSecurity(pool) {
 
   async function sendSession(req, res, principal, familyId = randomBytes(16).toString('hex'), options = {}) {
     const refreshToken = randomBytes(48).toString('base64url');
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
-      await storeRefreshToken(client, principal, familyId, refreshToken);
-      await client.query('COMMIT');
-    } catch (error) {
-      await client.query('ROLLBACK').catch(() => {});
-      throw error;
-    } finally {
-      client.release();
-    }
+    await storeRefreshToken(pool, principal, familyId, refreshToken);
 
     const accessToken = await issueAccessToken(principal);
     const response = { success: true, accessToken, expiresIn: ACCESS_TTL_SECONDS, user: principal };
@@ -288,6 +278,19 @@ export function createAuthSecurity(pool) {
       '/api/auth/logout',
       '/api/agentes/login',
     ].includes(req.path);
+  }
+
+  function normalizeApiVersion(req, res, next) {
+    const versionedPath = req.url.match(/^\/api\/v(\d+)(?=\/|(?:\?|$))/);
+    if (!versionedPath) {
+      if (req.url.startsWith('/api/')) res.setHeader('Deprecation', 'true');
+      return next();
+    }
+    if (versionedPath[1] !== '1') {
+      return res.status(404).json({ error: 'Versão da API não suportada.' });
+    }
+    req.url = req.url.replace(/^\/api\/v1(?=\/|(?:\?|$))/, '/api');
+    next();
   }
 
   function authenticateApi(req, res, next) {
@@ -379,6 +382,11 @@ export function createAuthSecurity(pool) {
     const path = req.path;
 
     if (path === '/api/auth/logout' || path === '/api/auth/change-password') return next();
+    if (path === '/api/admin/backup' && (
+      method !== 'GET' || !PLATFORM_ROLES.has(role)
+    )) {
+      return res.status(403).json({ error: 'Ação não autorizada.' });
+    }
     if (
       path.startsWith('/api/categoria_contribuintes')
       && method !== 'GET'
@@ -597,6 +605,7 @@ export function createAuthSecurity(pool) {
 
   return {
     authRateLimit,
+    normalizeApiVersion,
     authenticateApi,
     authorizeApi,
     authenticate,

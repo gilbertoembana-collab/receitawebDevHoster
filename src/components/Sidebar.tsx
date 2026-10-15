@@ -123,9 +123,7 @@ export default function Sidebar({ mobileOpen, onClose }: SidebarProps) {
       path: '/configuracoes', 
       icon: Settings, 
       roles: [
-        'Platform Owner',
-        'Administrador Municipal',
-        'Super Administrador', 'Super Admin', 'Administrator'
+        'Platform Owner', 'Super Administrador', 'Super Admin', 'Administrator'
       ] 
     },
     { 
@@ -157,8 +155,8 @@ export default function Sidebar({ mobileOpen, onClose }: SidebarProps) {
     <div className="flex flex-col h-full bg-[#0B4EA2] text-white font-sans border-r border-blue-800/50 w-60">
       {/* Brand Header */}
       <div className="flex items-center gap-3 px-6 py-5 border-b border-blue-800/50">
-        <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-blue-700/80 text-white font-bold text-xl shadow-md border border-blue-600/50">
-          R3
+        <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-white shadow-md border border-white/80 overflow-hidden">
+          <img src="/logo-receita360.png" alt="Logótipo Receita 360" className="w-full h-full object-contain" />
         </div>
         <div>
           <h1 className="text-xl font-bold leading-none text-white tracking-tight">Receita 360</h1>

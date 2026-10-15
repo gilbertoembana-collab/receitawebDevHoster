@@ -30,6 +30,12 @@ class PostgresSyncEngine {
   };
 
   private listeners: { [collection: string]: Array<(data: any) => void> } = {};
+  private syncInterval: ReturnType<typeof setInterval> | null = null;
+  private syncInFlight: Promise<void> | null = null;
+  private lastSyncAt = 0;
+  private authenticated = false;
+  private authGeneration = 0;
+
   constructor() {
     this.data = {
       usuarios: [],
@@ -58,7 +64,6 @@ class PostgresSyncEngine {
         imprimirLogoRecibo: true,
         textoRodapeRecibo: 'Obrigado por contribuir com o desenvolvimento do Município. Conserve este recibo.',
         versaoMinimaApp: '2.4.0',
-        chaveApiGlobalDispositivos: 'R360-KEY-GLOBAL-PRODUCTION',
         dispositivos: []
       }
     };
@@ -66,16 +71,10 @@ class PostgresSyncEngine {
     // Load initial cached data from localStorage to ensure immediate display
     this.loadFromLocalStorage();
 
-    // Fetch live database data on launch and periodically with smart throttling
-    this.syncAllWithServer();
-    setInterval(() => {
-      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
-        this.syncAllWithServer();
-      }
-    }, 8000);
-
     if (typeof window !== 'undefined') {
-      window.addEventListener('focus', () => this.syncAllWithServer());
+      window.addEventListener('focus', () => {
+        if (Date.now() - this.lastSyncAt >= 30_000) void this.syncAllWithServer();
+      });
     }
   }
 
@@ -116,7 +115,25 @@ class PostgresSyncEngine {
   }
 
   public setTenantContext(_municipioId: string, _role: string) {
-    this.syncAllWithServer();
+    this.authenticated = true;
+    this.authGeneration += 1;
+    if (this.syncInterval === null) {
+      this.syncInterval = setInterval(() => {
+        if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+          void this.syncAllWithServer();
+        }
+      }, 60_000);
+    }
+    void this.syncAllWithServer();
+  }
+
+  public clearTenantContext() {
+    this.authenticated = false;
+    this.authGeneration += 1;
+    if (this.syncInterval !== null) {
+      clearInterval(this.syncInterval);
+      this.syncInterval = null;
+    }
   }
 
   public async loadContributorsPage(page: number, search = ''): Promise<{ items: Contribuinte[]; total: number }> {
@@ -176,28 +193,43 @@ class PostgresSyncEngine {
     return updatedContributor;
   }
 
-  private async syncAllWithServer() {
-    try {
-      const res = await apiFetch('/api/sync-state');
-      if (res.ok) {
-        const batch = await res.json();
-        const keys = ['usuarios', 'municipios', 'mercados', 'agentes', 'contribuintes', 'categoria_contribuintes', 'tipos_receita', 'pagamentos', 'auditoria', 'sincronizacao'];
-        for (const k of keys) {
-          if (Array.isArray(batch[k])) {
-            this.data[k as keyof typeof this.data] = omitCredentialFields(batch[k]) as any;
-            this.saveToLocalStorage(k);
-            this.notify(k);
+  private syncAllWithServer(): Promise<void> {
+    if (!this.authenticated) return Promise.resolve();
+    if (this.syncInFlight) return this.syncInFlight;
+
+    const authGeneration = this.authGeneration;
+    this.lastSyncAt = Date.now();
+    this.syncInFlight = (async () => {
+      try {
+        const res = await apiFetch('/api/sync-state');
+        if (!this.authenticated || authGeneration !== this.authGeneration) return;
+        if (res.ok) {
+          const batch = await res.json();
+          if (!this.authenticated || authGeneration !== this.authGeneration) return;
+          const keys = ['usuarios', 'municipios', 'mercados', 'agentes', 'contribuintes', 'categoria_contribuintes', 'tipos_receita', 'pagamentos', 'auditoria', 'sincronizacao'];
+          for (const k of keys) {
+            if (Array.isArray(batch[k])) {
+              this.data[k as keyof typeof this.data] = omitCredentialFields(batch[k]) as any;
+              this.saveToLocalStorage(k);
+              this.notify(k);
+            }
+          }
+          if (batch.configuracoes && Object.keys(batch.configuracoes).length > 0) {
+            this.data.configuracoes = batch.configuracoes;
+            this.saveToLocalStorage('configuracoes');
+            this.notify('configuracoes');
           }
         }
-        if (batch.configuracoes && Object.keys(batch.configuracoes).length > 0) {
-          this.data.configuracoes = batch.configuracoes;
-          this.saveToLocalStorage('configuracoes');
-          this.notify('configuracoes');
-        }
+      } catch (error) {
+        console.warn('Failed to synchronize application data:', error);
       }
-    } catch (error) {
-      console.warn('Failed to synchronize application data:', error);
-    }
+    })().finally(() => {
+      this.syncInFlight = null;
+      if (this.authenticated && authGeneration !== this.authGeneration) {
+        void this.syncAllWithServer();
+      }
+    });
+    return this.syncInFlight;
   }
 
   // Subscribe to changes
@@ -218,6 +250,12 @@ class PostgresSyncEngine {
       const copy = JSON.parse(JSON.stringify(this.data[collection as keyof typeof this.data]));
       this.listeners[collection].forEach(callback => callback(copy));
     }
+  }
+
+  public replaceConfiguracoes(config: SystemConfig) {
+    this.data.configuracoes = omitCredentialFields(config);
+    this.saveToLocalStorage('configuracoes');
+    this.notify('configuracoes');
   }
 
   // Add Item

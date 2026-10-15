@@ -1,13 +1,21 @@
 let accessToken: string | null = null;
 let refreshInFlight: Promise<string | null> | null = null;
 
+export const API_BASE_PATH = '/api/v1';
+
+function versionedApiInput(input: RequestInfo | URL): RequestInfo | URL {
+  if (typeof input !== 'string') return input;
+  if (!input.startsWith('/api/')) return input;
+  return `${API_BASE_PATH}${input.slice('/api'.length)}`;
+}
+
 export function setAccessToken(token: string | null) {
   accessToken = token;
 }
 
 async function refreshAccessToken(): Promise<string | null> {
   if (!refreshInFlight) {
-    refreshInFlight = fetch('/api/auth/refresh', {
+    refreshInFlight = fetch(`${API_BASE_PATH}/auth/refresh`, {
       method: 'POST',
       credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json', 'X-Client-Type': 'web' },
@@ -29,13 +37,14 @@ async function refreshAccessToken(): Promise<string | null> {
 }
 
 export async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
-  const url = typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url;
-  const isAuthEndpoint = url.includes('/api/auth/login') || url.includes('/api/auth/refresh');
+  const requestInput = versionedApiInput(input);
+  const url = typeof requestInput === 'string' ? requestInput : requestInput instanceof URL ? requestInput.pathname : requestInput.url;
+  const isAuthEndpoint = url.includes('/auth/login') || url.includes('/auth/refresh');
   const request = (token: string | null) => {
     const headers = new Headers(init.headers);
     if (token) headers.set('Authorization', `Bearer ${token}`);
     headers.set('X-Client-Type', 'web');
-    return fetch(input, { ...init, headers, credentials: 'same-origin' });
+    return fetch(requestInput, { ...init, headers, credentials: 'same-origin' });
   };
 
   let response = await request(accessToken);
@@ -55,7 +64,7 @@ export async function logoutSession() {
     if (accessToken) {
       await apiFetch('/api/auth/logout', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
     } else {
-      await fetch('/api/auth/logout', {
+      await fetch(`${API_BASE_PATH}/auth/logout`, {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json', 'X-Client-Type': 'web' },

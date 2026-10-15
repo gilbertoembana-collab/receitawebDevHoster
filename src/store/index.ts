@@ -82,6 +82,7 @@ interface AppStore {
   cancelPayment: (id: string, reason: string) => void;
 
   updateConfiguracoes: (updates: Partial<SystemConfig>) => void;
+  saveConfiguracoes: (updates: Partial<SystemConfig>) => Promise<void>;
 }
 
 const INITIAL_USUARIOS: Usuario[] = [
@@ -108,7 +109,14 @@ const DEFAULT_CONFIG: SystemConfig = {
   temaEscuro: false,
   notificacoesHabilitadas: true,
   taxaComissao: 10,
-  comissaoPaga: 0
+  comissaoPaga: 0,
+  modoOfflineHoras: 24,
+  geofencingAtivo: true,
+  limiteDiarioColetaPorAgente: 500000,
+  imprimirLogoRecibo: true,
+  textoRodapeRecibo: 'Obrigado por contribuir com o desenvolvimento do Município.',
+  versaoMinimaApp: '2.4.0',
+  dispositivos: [],
 };
 
 export const useAppStore = create<AppStore>((set, get) => {
@@ -173,6 +181,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     setCurrentUser: (user) => {
       if (!user) {
         void logoutSession();
+        dbService.clearTenantContext();
         set({ currentUser: null, activeProfile: 'Super Admin' });
         return;
       }
@@ -205,7 +214,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     notifications: [
       { id: '1', title: 'Fase Piloto Ativada', message: 'Sistema pronto para início da operação piloto com dados em tempo real da base de dados.', time: 'Agora', read: false, type: 'info' }
     ],
-    addNotification: (n) => set((state) => ({
+    addNotification: (n) => set((state) => state.configuracoes.notificacoesHabilitadas ? ({
       notifications: [
         {
           id: Math.random().toString(36).substr(2, 9),
@@ -215,7 +224,7 @@ export const useAppStore = create<AppStore>((set, get) => {
         },
         ...state.notifications
       ]
-    })),
+    }) : state),
     markNotificationRead: (id) => set((state) => ({
       notifications: state.notifications.map(n => n.id === id ? { ...n, read: true } : n)
     })),
@@ -359,6 +368,22 @@ export const useAppStore = create<AppStore>((set, get) => {
 
     updateConfiguracoes: (updates) => {
       dbService.updateDocument('configuracoes', '', updates);
+    },
+    saveConfiguracoes: async (updates) => {
+      const response = await apiFetch('/api/configuracoes', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates),
+      });
+      const result = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(typeof result?.error === 'string' ? result.error : 'Não foi possível guardar as configurações.');
+      }
+      if (!result || typeof result !== 'object' || Array.isArray(result)) {
+        throw new Error('O servidor devolveu uma resposta de configuração inválida.');
+      }
+      dbService.replaceConfiguracoes(result);
+      dbService.addAuditLog('alteracao', 'Configurações do sistema atualizadas');
     },
 
     // CRUD Usuarios

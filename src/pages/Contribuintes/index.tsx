@@ -207,7 +207,7 @@ export default function Contribuintes() {
             .card { width: 54mm; height: 85.6mm; overflow: hidden; background: #fff; position: relative; display: flex; flex-direction: column; }
             .header { flex: 0 0 20mm; padding: 1mm 1.5mm; display: grid; grid-template-columns: 8mm 1fr 8mm; align-items: center; gap: .7mm; text-align: center; }
             .municipal-logo, .system-logo { width: 8.5mm; height: 8.5mm; object-fit: contain; border-radius: 50%; }
-            .system-logo { background: #70c4ed; display: grid; place-items: center; color: #0b4ea2; font-weight: 900; font-size: 12pt; letter-spacing: -1pt; border: .4mm solid #d7effb; }
+            .system-logo { border: .4mm solid #d7effb; background: #fff; }
             .heading { font-size: 5.1pt; font-weight: 900; line-height: 1.2; }
             .ministry { display: inline-block; white-space: nowrap; font-size: 3.4pt; letter-spacing: -.08pt; }
             .market { flex: 0 0 7mm; padding: 1mm; color: #066338; text-align: center; text-transform: uppercase; font-size: 8pt; font-weight: 900; letter-spacing: .25pt; overflow: hidden; white-space: nowrap; }
@@ -236,7 +236,7 @@ export default function Contribuintes() {
                 <span class="ministry">MINISTÉRIO DA ADMINISTRAÇÃO TERRITORIAL E PODER LOCAL</span><br>
                 CÂMARA MUNICIPAL${municipalityNameSuffix ? `<br>${escapeCardHtml(municipalityNameSuffix.toUpperCase())}` : ''}
               </div>
-              <div class="system-logo" aria-label="Sistema Receita 360">R3</div>
+              <img class="system-logo" src="/logo-receita360.png" alt="Logótipo Receita 360">
             </header>
             <div class="market">${escapeCardHtml(marketName)}</div>
             <div class="card-title">CARTÃO DE UTENTE</div>
@@ -1079,9 +1079,21 @@ export default function Contribuintes() {
                       </Typography>
                     )}
                   </Box>
-                  <Box sx={{ width: '95%', aspectRatio: '1', mx: 'auto', borderRadius: '50%', bgcolor: '#70c4ed', display: 'grid', placeItems: 'center', color: '#0b4ea2', fontWeight: 1000, fontSize: { xs: 12, sm: 18 }, letterSpacing: -1, border: '2px solid #d7effb', boxShadow: 'inset 0 0 0 2px rgba(255,255,255,.65)' }}>
-                    R3
-                  </Box>
+                  <Box
+                    component="img"
+                    src="/logo-receita360.png"
+                    alt="Logótipo Receita 360"
+                    sx={{
+                      width: '95%',
+                      aspectRatio: '1',
+                      mx: 'auto',
+                      borderRadius: '50%',
+                      bgcolor: '#fff',
+                      objectFit: 'contain',
+                      border: '2px solid #d7effb',
+                      boxShadow: 'inset 0 0 0 2px rgba(255,255,255,.65)',
+                    }}
+                  />
                 </Box>
 
                 <Box

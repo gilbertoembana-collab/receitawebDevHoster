@@ -167,6 +167,7 @@ test('API routes require a valid access token and do not trust caller-supplied r
   process.env.JWT_REFRESH_SECRET = 'test-refresh-secret-that-is-at-least-32-bytes';
   process.env.NODE_ENV = 'test';
   const fakePool = {
+    query: async () => ({ rows: [] }),
     connect: async () => ({
       query: async () => ({ rows: [] }),
       release() {},
@@ -190,11 +191,13 @@ test('API routes require a valid access token and do not trust caller-supplied r
 
   const app = express();
   app.use(express.json());
+  app.use(security.normalizeApiVersion);
   app.use(security.cors);
   app.use(security.authenticateApi);
   app.use(security.authorizeApi);
   app.post('/api/auth/login', security.authRateLimit, (_req, res) => res.json({ ok: true }));
   app.get('/api/pagamentos', (_req, res) => res.json({ ok: true }));
+  app.get('/api/admin/backup', (_req, res) => res.status(200).send('backup'));
   app.post('/api/usuarios', (_req, res) => res.json({ ok: true }));
   const server = app.listen(0);
   await new Promise((resolve) => server.once('listening', resolve));
@@ -205,6 +208,12 @@ test('API routes require a valid access token and do not trust caller-supplied r
     headers: { 'x-user-role': 'Platform Owner' },
   });
   assert.equal(noToken.status, 401);
+  const versionedNoToken = await fetch(`${baseUrl}/api/v1/pagamentos`);
+  assert.equal(versionedNoToken.status, 401);
+  const noTokenBackup = await fetch(`${baseUrl}/api/v1/admin/backup`);
+  assert.equal(noTokenBackup.status, 401);
+  const unsupportedVersion = await fetch(`${baseUrl}/api/v2/pagamentos`);
+  assert.equal(unsupportedVersion.status, 404);
   const invalidToken = await fetch(`${baseUrl}/api/pagamentos`, {
     headers: { Authorization: 'Bearer invalid-token' },
   });
@@ -214,6 +223,17 @@ test('API routes require a valid access token and do not trust caller-supplied r
     headers: { Authorization: `Bearer ${session.accessToken}` },
   });
   assert.equal(allowedRead.status, 200);
+  assert.equal(allowedRead.headers.get('deprecation'), 'true');
+  const versionedAllowedRead = await fetch(`${baseUrl}/api/v1/pagamentos`, {
+    headers: { Authorization: 'Bearer ' + session.accessToken },
+  });
+  assert.equal(versionedAllowedRead.status, 200);
+  const forbiddenBackup = await fetch(`${baseUrl}/api/v1/admin/backup`, {
+    headers: { Authorization: 'Bearer ' + session.accessToken },
+  });
+  assert.equal(forbiddenBackup.status, 403);
+  const versionedLogin = await fetch(`${baseUrl}/api/v1/auth/login`, { method: 'POST' });
+  assert.equal(versionedLogin.status, 200);
 
   const deniedWrite = await fetch(`${baseUrl}/api/usuarios`, {
     method: 'POST',
@@ -283,6 +303,40 @@ test('contributor category changes are restricted to platform administrators', (
     auth: { role: 'Platform Owner', kind: 'user' },
   }, makeResponse(), () => { platformNextCalled = true; });
 
+  assert.equal(platformNextCalled, true);
+});
+
+test('database backups are restricted to platform administrators and GET requests', () => {
+  process.env.JWT_ACCESS_SECRET = 'test-access-secret-that-is-at-least-32-bytes';
+  process.env.JWT_REFRESH_SECRET = 'test-refresh-secret-that-is-at-least-32-bytes';
+  const security = createAuthSecurity({ query: async () => ({ rows: [] }) });
+
+  const municipalResponse = makeResponse();
+  let municipalNextCalled = false;
+  security.authorizeApi({
+    path: '/api/admin/backup',
+    method: 'GET',
+    auth: { role: 'Administrador Municipal', kind: 'user' },
+  }, municipalResponse, () => { municipalNextCalled = true; });
+  assert.equal(municipalResponse.statusCode, 403);
+  assert.equal(municipalNextCalled, false);
+
+  const wrongMethodResponse = makeResponse();
+  let wrongMethodNextCalled = false;
+  security.authorizeApi({
+    path: '/api/admin/backup',
+    method: 'POST',
+    auth: { role: 'Platform Owner', kind: 'user' },
+  }, wrongMethodResponse, () => { wrongMethodNextCalled = true; });
+  assert.equal(wrongMethodResponse.statusCode, 403);
+  assert.equal(wrongMethodNextCalled, false);
+
+  let platformNextCalled = false;
+  security.authorizeApi({
+    path: '/api/admin/backup',
+    method: 'GET',
+    auth: { role: 'Platform Owner', kind: 'user' },
+  }, makeResponse(), () => { platformNextCalled = true; });
   assert.equal(platformNextCalled, true);
 });
 

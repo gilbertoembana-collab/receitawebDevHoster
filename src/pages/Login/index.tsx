@@ -1,8 +1,17 @@
 import React, { useState } from 'react';
 import { useAppStore } from '../../store';
-import { LogIn, Mail, Lock, Eye, EyeOff } from 'lucide-react';
+import {
+  ArrowRight,
+  Eye,
+  EyeOff,
+  Landmark,
+  LockKeyhole,
+  Mail,
+  ShieldCheck,
+} from 'lucide-react';
 import { dbService } from '../../services/db';
-import { setAccessToken } from '../../services/api';
+import { API_BASE_PATH, setAccessToken } from '../../services/api';
+import './login.css';
 
 export default function Login() {
   const { setCurrentUser, addNotification } = useAppStore();
@@ -24,7 +33,7 @@ export default function Login() {
     setIsLoading(true);
 
     try {
-      const res = await fetch('/api/auth/login', {
+      const res = await fetch(`${API_BASE_PATH}/auth/login`, {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json', 'X-Client-Type': 'web' },
@@ -61,105 +70,178 @@ export default function Login() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-slate-50 dark:bg-slate-950 px-4 font-sans py-12">
-      <div className="w-full max-w-md">
-        {/* Brand Logo and Title */}
-        <div className="text-center mb-8 animate-fade-in">
-          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-[#0B4EA2] text-white font-extrabold text-2xl shadow-lg border border-blue-400/20 mb-3">
-            R3
+    <main className="login-page">
+      <div className="login-shell">
+        <section className="login-showcase" aria-label="Receita 360">
+          <div className="showcase-glow showcase-glow-top" />
+          <div className="showcase-glow showcase-glow-bottom" />
+          <div className="showcase-content">
+            <div className="showcase-brand">
+              <div className="brand-mark">
+                <img src="/logo-receita360.png" alt="Logótipo Receita 360" />
+              </div>
+              <div>
+                <span className="brand-name">Receita 360</span>
+                <span className="brand-caption">GESTÃO MUNICIPAL INTEGRADA</span>
+              </div>
+            </div>
+
+            <div className="showcase-message">
+              <span className="showcase-eyebrow">
+                <span className="eyebrow-dot" />
+                TECNOLOGIA AO SERVIÇO DO MUNICÍPIO
+              </span>
+              <h1>
+                Uma gestão mais simples.
+                <br />
+                <span> Resultados melhores.</span>
+              </h1>
+              <p>
+                Acompanhe receitas, contribuintes e operações municipais num só lugar.
+                Mais clareza para decidir e mais eficiência para servir.
+              </p>
+            </div>
+
+            <div className="showcase-art" aria-hidden="true">
+              <div className="art-orbit art-orbit-outer" />
+              <div className="art-orbit art-orbit-inner" />
+              <div className="art-sun" />
+              <svg className="city-illustration" viewBox="0 0 540 250" fill="none">
+                <path d="M0 218H540" stroke="rgba(255,255,255,.28)" />
+                <g stroke="rgba(216,234,255,.66)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M53 218C59 184 62 153 66 124" />
+                  <path d="M66 125C48 112 35 108 24 109C38 119 48 126 63 129M67 124C57 104 48 94 38 89C44 103 51 115 65 128M68 123C68 101 72 88 79 78C79 96 77 111 70 128M69 124C82 106 94 98 106 95C96 108 85 118 72 130M68 127C88 120 102 121 114 126C97 131 83 132 68 132" />
+                  <path d="M36 218V171L81 154L121 171V218M41 173L81 158L116 173M48 181V218M81 179V218M108 181V218" />
+                  <path d="M132 218V169H177V218M128 169L154 153L181 169M140 179V193M164 179V193M140 202V218M164 202V218" />
+                  <path d="M189 218V181H251V218M184 181H256M193 181L204 168H236L247 181M204 169V181M215 169V181M226 169V181M237 169V181M197 194H243M197 204H243" />
+                  <path d="M266 218V126H405V218M258 127H413M268 126L278 116H393L403 126M281 116V107H390V116" />
+                  <path d="M280 142H391M291 145V218M317 145V218M343 145V218M369 145V218M391 142V218" />
+                  <path d="M296 218V186C296 174 304 166 314 166C324 166 332 174 332 186V218M337 218V186C337 174 345 166 355 166C365 166 373 174 373 186V218" />
+                  <path d="M322 107V88H348V107M330 87V77H340V87" />
+                  <path d="M347 78V61M347 62L364 68L347 73" stroke="rgba(245,205,131,.92)" />
+                  <path d="M416 218V168H465V218M412 168H469M418 168L440 154L463 168M426 180V194M450 180V194M426 202V218M450 202V218" />
+                  <path d="M486 218C490 190 493 166 496 142" />
+                  <path d="M496 143C481 132 470 128 460 129C471 138 480 144 494 147M497 142C490 126 483 117 474 112C478 124 485 135 495 146M498 141C499 125 503 114 509 106C509 120 507 133 500 146M499 143C512 130 523 125 535 125C526 135 515 142 502 148" />
+                  <path d="M18 219H522" stroke="rgba(255,255,255,.22)" strokeWidth="3" />
+                </g>
+                <g stroke="rgba(245,205,131,.62)" strokeWidth="1.5" strokeLinecap="round">
+                  <path d="M36 171H121M128 169H181M184 181H256M258 127H413M412 168H469" />
+                  <path d="M56 187H72M87 187H103M140 189H164M211 195H234" />
+                </g>
+                <path d="M183 218H257V198H183Z" fill="rgba(245,205,131,.08)" />
+                <path d="M264 218H407V214H264Z" fill="rgba(255,255,255,.08)" />
+              </svg>
+            </div>
+
+            <div className="showcase-footer">
+              <div className="flag-accent" aria-hidden="true">
+                <span />
+                <span />
+                <span />
+              </div>
+              <span>REPÚBLICA DA GUINÉ-BISSAU</span>
+              <span className="footer-separator">•</span>
+              <span>PLATAFORMA MUNICIPAL</span>
+            </div>
           </div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-white">
-            Receita 360
-          </h1>
-          <p className="text-xs text-[#0B4EA2] dark:text-blue-400 uppercase tracking-widest font-semibold mt-1">
-            Gestão Municipal Integrada
-          </p>
-        </div>
+        </section>
 
-        {/* Login Card */}
-        <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xl p-8 transition-colors duration-150 animate-fade-in">
-          <h2 className="text-lg font-bold text-slate-800 dark:text-slate-100 mb-1">
-            Acesso ao Painel
-          </h2>
-          <p className="text-xs text-slate-500 dark:text-slate-400 mb-6">
-            Insira suas credenciais corporativas homologadas
-          </p>
-
-          {error && (
-            <div className="mb-4 p-3 rounded-lg bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-900 text-xs text-red-600 dark:text-red-400 font-medium">
-              {error}
+        <section className="login-panel" aria-labelledby="login-title">
+          <div className="login-panel-inner">
+            <div className="mobile-brand">
+              <img
+                className="mobile-brand-mark"
+                src="/logo-receita360.png"
+                alt="Logótipo Receita 360"
+              />
+              <span>Receita 360</span>
             </div>
-          )}
 
-          <form onSubmit={handleSubmit} className="space-y-4">
-            {/* Email / Username Field */}
-            <div>
-              <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">
-                Usuário ou E-mail
-              </label>
-              <div className="relative">
-                <Mail
-                  size={16}
-                  className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
-                />
-                <input
-                  type="text"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="exemplo@receita360.gw"
-                  disabled={isLoading}
-                  className="w-full pl-10 pr-4 py-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg text-xs text-slate-800 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 outline-none focus:border-[#0B4EA2] focus:bg-white dark:focus:bg-slate-900 focus:ring-2 focus:ring-blue-100 dark:focus:ring-blue-900/20 transition-all"
-                />
+            <div className="form-heading">
+              <span className="form-kicker">ÁREA DE ACESSO</span>
+              <h2 id="login-title">Bem-vindo de volta</h2>
+              <p>Introduza as suas credenciais para continuar.</p>
+            </div>
+
+            {error && (
+              <div className="login-error" role="alert">
+                {error}
               </div>
-            </div>
+            )}
 
-            {/* Password Field */}
-            <div>
-              <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 mb-1.5">
-                Senha de Acesso
-              </label>
-              <div className="relative">
-                <Lock
-                  size={16}
-                  className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
-                />
-                <input
-                  type={showPassword ? 'text' : 'password'}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
-                  disabled={isLoading}
-                  className="w-full pl-10 pr-10 py-2.5 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-lg text-xs text-slate-800 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 outline-none focus:border-[#0B4EA2] focus:bg-white dark:focus:bg-slate-900 focus:ring-2 focus:ring-blue-100 dark:focus:ring-blue-900/20 transition-all"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword(!showPassword)}
-                  disabled={isLoading}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors"
-                >
-                  {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
-                </button>
+            <form onSubmit={handleSubmit} className="login-form">
+              <div className="login-field">
+                <label htmlFor="login-username">Utilizador ou e-mail</label>
+                <div className="input-wrap">
+                  <Mail size={18} aria-hidden="true" />
+                  <input
+                    id="login-username"
+                    type="text"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="O seu utilizador ou e-mail"
+                    autoComplete="username"
+                    autoCapitalize="none"
+                    spellCheck={false}
+                    disabled={isLoading}
+                    required
+                  />
+                </div>
               </div>
+
+              <div className="login-field">
+                <label htmlFor="login-password">Palavra-passe</label>
+                <div className="input-wrap">
+                  <LockKeyhole size={18} aria-hidden="true" />
+                  <input
+                    id="login-password"
+                    type={showPassword ? 'text' : 'password'}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="Introduza a sua palavra-passe"
+                    autoComplete="current-password"
+                    disabled={isLoading}
+                    required
+                  />
+                  <button
+                    className="password-toggle"
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    disabled={isLoading}
+                    aria-label={showPassword ? 'Ocultar palavra-passe' : 'Mostrar palavra-passe'}
+                  >
+                    {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                  </button>
+                </div>
+              </div>
+
+              <button className="login-submit" type="submit" disabled={isLoading}>
+                {isLoading ? (
+                  <>
+                    <span className="login-spinner" aria-hidden="true" />
+                    A autenticar...
+                  </>
+                ) : (
+                  <>
+                    Entrar no sistema
+                    <ArrowRight size={18} aria-hidden="true" />
+                  </>
+                )}
+              </button>
+            </form>
+
+            <div className="secure-note">
+              <ShieldCheck size={17} aria-hidden="true" />
+              <span>A sua sessão é protegida e encriptada.</span>
             </div>
 
-            {/* Login Button */}
-            <button
-              type="submit"
-              disabled={isLoading}
-              className="w-full py-2.5 px-4 bg-[#0B4EA2] hover:bg-blue-700 text-white font-bold text-xs rounded-lg transition-colors flex items-center justify-center gap-2 shadow-md hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed mt-6 uppercase tracking-wider cursor-pointer"
-            >
-              {isLoading ? (
-                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-              ) : (
-                <>
-                  <LogIn size={14} />
-                  <span>Entrar no Sistema</span>
-                </>
-              )}
-            </button>
-          </form>
-        </div>
+            <div className="login-panel-footer">
+              <span><Landmark size={15} aria-hidden="true" /> Receita 360</span>
+              <span>GS-TIC SARL © {new Date().getFullYear()} · Todos os direitos reservados</span>
+            </div>
+          </div>
+        </section>
       </div>
-    </div>
+    </main>
   );
 }

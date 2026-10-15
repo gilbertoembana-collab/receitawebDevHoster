@@ -137,7 +137,7 @@ export interface AuditoriaLog {
   hora: string; // HH:mm:ss
   ip: string;
   dispositivo: string;
-  acao: 'login' | 'logout' | 'criacao' | 'alteracao' | 'exclusao' | 'cancelamento' | 'reimpressao' | 'sincronizacao';
+  acao: 'login' | 'logout' | 'criacao' | 'alteracao' | 'exclusao' | 'cancelamento' | 'reimpressao' | 'sincronizacao' | 'backup';
   descricao: string;
 }
 
@@ -186,6 +186,5 @@ export interface SystemConfig {
   imprimirLogoRecibo?: boolean;
   textoRodapeRecibo?: string;
   versaoMinimaApp?: string;
-  chaveApiGlobalDispositivos?: string;
   dispositivos?: Dispositivo[];
 }
